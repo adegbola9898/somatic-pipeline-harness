@@ -1,0 +1,19 @@
+name: genomics
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python=3.11
+  - sra-tools
+  - pigz
+  - fastp
+  - bwa-mem2
+  - samtools
+  - openjdk=17
+  - gatk4
+  - bcftools
+  - bedtools
+  - mosdepth
+  - wget
+  - unzip
+  - coreutils
