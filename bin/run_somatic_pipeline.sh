@@ -78,6 +78,17 @@ else
   [[ -n "$FASTQ1" && -n "$FASTQ2" ]] || die "provide --fastq1 and --fastq2 (or use --sra)"
 fi
 
+# ---- preflight inputs ----
+if [[ -n "$SRA" ]]; then
+  : # SRA preflight happens later (download step). For now, accept the accession string.
+else
+  require_file "$FASTQ1"
+  require_file "$FASTQ2"
+fi
+
+require_file "$TARGETS_BED"
+[[ -d "$REF_BUNDLE_DIR" ]] || die "missing reference bundle dir: $REF_BUNDLE_DIR"
+
 # ---- derive contract paths ----
 SAMPLE_ROOT="${OUTDIR%/}/${SAMPLE_ID}"
 INPUTS_DIR="${SAMPLE_ROOT}/inputs"
