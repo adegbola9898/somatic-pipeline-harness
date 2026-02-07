@@ -49,18 +49,25 @@ Notes:
 USAGE
 }
 
+# Guard for flags that require a value (prevents "$2" being unset)
+need_arg() {
+  local flag="$1"
+  shift || true
+  [[ $# -ge 1 ]] || die "missing value for $flag"
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --sample-id) SAMPLE_ID="$2"; shift 2;;
-    --fastq1) FASTQ1="$2"; shift 2;;
-    --fastq2) FASTQ2="$2"; shift 2;;
-    --sra) SRA="$2"; shift 2;;
-    --outdir) OUTDIR="$2"; shift 2;;
-    --workdir) WORKDIR="$2"; shift 2;;
-    --ref-bundle-dir) REF_BUNDLE_DIR="$2"; shift 2;;
-    --targets-bed) TARGETS_BED="$2"; shift 2;;
-    --threads) THREADS="$2"; shift 2;;
-    --enforce-qc-gate) ENFORCE_QC_GATE="$2"; shift 2;;
+    --sample-id) need_arg "$1" "${@:2}"; SAMPLE_ID="$2"; shift 2;;
+    --fastq1) need_arg "$1" "${@:2}"; FASTQ1="$2"; shift 2;;
+    --fastq2) need_arg "$1" "${@:2}"; FASTQ2="$2"; shift 2;;
+    --sra) need_arg "$1" "${@:2}"; SRA="$2"; shift 2;;
+    --outdir) need_arg "$1" "${@:2}"; OUTDIR="$2"; shift 2;;
+    --workdir) need_arg "$1" "${@:2}"; WORKDIR="$2"; shift 2;;
+    --ref-bundle-dir) need_arg "$1" "${@:2}"; REF_BUNDLE_DIR="$2"; shift 2;;
+    --targets-bed) need_arg "$1" "${@:2}"; TARGETS_BED="$2"; shift 2;;
+    --threads) need_arg "$1" "${@:2}"; THREADS="$2"; shift 2;;
+    --enforce-qc-gate) need_arg "$1" "${@:2}"; ENFORCE_QC_GATE="$2"; shift 2;;
     -h|--help) usage; exit 0;;
     *) die "unknown arg: $1 (use --help)";;
   esac
