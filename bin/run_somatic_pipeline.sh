@@ -25,6 +25,17 @@ run_cmd() {
   "$@" 1>>"$STDOUT_LOG" 2>>"$STDERR_LOG" || die "failed: $label"
 }
 
+ensure_parent() { mkdir -p "$(dirname "$1")"; }
+file_nonempty() { [[ -s "$1" ]]; }
+
+write_atomic() {
+  local out="$1"
+  local tmp="${out}.tmp.$$"
+  ensure_parent "$out"
+  cat > "$tmp"
+  mv -f "$tmp" "$out"
+}
+
 # ---- CLI (minimal; will expand next milestone item) ----
 SAMPLE_ID=""
 FASTQ1=""
@@ -105,6 +116,54 @@ QC_DIR="${SAMPLE_ROOT}/qc"
 LOG_DIR="${SAMPLE_ROOT}/logs"
 META_DIR="${SAMPLE_ROOT}/metadata"
 
+step_resources() {
+  local manifest="${META_DIR}/ref_bundle_manifest_used.json"
+
+  if file_nonempty "$manifest"; then
+    log "SKIP step_resources (outputs present)"
+    return
+  fi
+
+  log "RUN step_resources"
+  write_atomic "$manifest" <<EOF
+{"ref_bundle_dir":"${REF_BUNDLE_DIR}","note":"placeholder; real resolver in Milestone 2"}
+EOF
+
+  file_nonempty "$manifest" || die "step_resources failed: missing $manifest"
+}
+
+step_metadata() {
+  local meta="${META_DIR}/run_metadata.json"
+
+  if file_nonempty "$meta"; then
+    log "SKIP step_metadata (outputs present)"
+    return
+  fi
+
+  log "RUN step_metadata"
+
+  write_atomic "$meta" <<EOF
+{
+  "pipeline_version": "${PIPELINE_VERSION}",
+  "sample_id": "${SAMPLE_ID}",
+  "timestamp": "$(date -Is)",
+  "inputs": {
+    "fastq1": "${FASTQ1}",
+    "fastq2": "${FASTQ2}",
+    "sra": "${SRA}"
+  },
+  "resources": {
+    "ref_bundle_dir": "${REF_BUNDLE_DIR}",
+    "targets_bed": "${TARGETS_BED}"
+  },
+  "threads": ${THREADS},
+  "enforce_qc_gate": ${ENFORCE_QC_GATE}
+}
+EOF
+
+  file_nonempty "$meta" || die "step_metadata failed: missing $meta"
+}
+
 mkdir -p "$INPUTS_DIR" "$WORK_DIR" "$RESULTS_DIR" "$QC_DIR" "$LOG_DIR" "$META_DIR"
 
 STDOUT_LOG="${LOG_DIR}/${SAMPLE_ID}.stdout.log"
@@ -120,12 +179,12 @@ log "Out: $SAMPLE_ROOT"
 for c in samtools bcftools gatk bwa-mem2 fastp; do require_cmd "$c"; done
 
 # ---- placeholder steps ----
-log "TODO: step_resources"
+step_resources
 log "TODO: step_ingest"
 log "TODO: step_fastp"
 log "TODO: step_align"
 log "TODO: step_mutect_call/filter"
 log "TODO: step_qc"
-log "TODO: step_metadata"
+step_metadata
 
 log "DONE (skeleton)."
