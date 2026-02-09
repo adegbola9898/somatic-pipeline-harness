@@ -36,6 +36,17 @@ write_atomic() {
   mv -f "$tmp" "$out"
 }
 
+sha256_of() { sha256sum "$1" | awk '{print $1}'; }
+
+verify_sha256_sidecar_in_dir() {
+  # expects sidecar in same directory; works with "sha  filename" format
+  local dir="$1"
+  local file="$2"
+  local sidecar="$3"
+  (cd "$dir" && sha256sum -c "$sidecar") >/dev/null 2>&1 \
+    || die "sha256 verification failed: dir=$dir sidecar=$sidecar"
+}
+
 # ---- CLI (minimal; will expand next milestone item) ----
 SAMPLE_ID=""
 FASTQ1=""
@@ -117,19 +128,123 @@ LOG_DIR="${SAMPLE_ROOT}/logs"
 META_DIR="${SAMPLE_ROOT}/metadata"
 
 step_resources() {
-  local manifest="${META_DIR}/ref_bundle_manifest_used.json"
+  local manifest="${META_DIR}/bundle_manifest_used.json"
+  local contigs="${META_DIR}/contig_compatibility.tsv"
 
-  if file_nonempty "$manifest"; then
+  if file_nonempty "$manifest" && file_nonempty "$contigs"; then
     log "SKIP step_resources (outputs present)"
     return
   fi
 
   log "RUN step_resources"
+
+  # ---- find reference tar + sha256 sidecar in ref dir ----
+  [[ -d "$REF_BUNDLE_DIR" ]] || die "ref bundle dir not found: $REF_BUNDLE_DIR"
+
+  local ref_tar
+  ref_tar="$(ls -1 "${REF_BUNDLE_DIR%/}"/*.tar.gz 2>/dev/null | head -n1 || true)"
+  [[ -n "$ref_tar" ]] || die "no reference *.tar.gz found in: $REF_BUNDLE_DIR"
+
+  local ref_tar_base
+  ref_tar_base="$(basename "$ref_tar")"
+
+  local ref_sha="${ref_tar}.sha256"
+  [[ -s "$ref_sha" ]] || die "missing ref sha256 sidecar: $ref_sha"
+
+  # Verify integrity using sidecar (must run in same dir as filename in sidecar)
+  verify_sha256_sidecar_in_dir "$(dirname "$ref_tar")" "$ref_tar_base" "$(basename "$ref_sha")"
+
+  # ---- verify targets bed + sha256 sidecar ----
+  require_file "$TARGETS_BED"
+  local targets_sha="${TARGETS_BED}.sha256"
+  [[ -s "$targets_sha" ]] || die "missing targets bed sha256 sidecar: $targets_sha"
+  verify_sha256_sidecar_in_dir "$(dirname "$TARGETS_BED")" "$(basename "$TARGETS_BED")" "$(basename "$targets_sha")"
+
+  # ---- stage copies into inputs/refs (provenance snapshot) ----
+  local refs_in="${INPUTS_DIR}/refs"
+  mkdir -p "$refs_in"
+
+  local staged_ref_tar="${refs_in}/${ref_tar_base}"
+  local staged_ref_sha="${refs_in}/$(basename "$ref_sha")"
+  cp -f "$ref_tar" "$staged_ref_tar"
+  cp -f "$ref_sha" "$staged_ref_sha"
+
+  local staged_targets_bed="${refs_in}/$(basename "$TARGETS_BED")"
+  local staged_targets_sha="${refs_in}/$(basename "$targets_sha")"
+  cp -f "$TARGETS_BED" "$staged_targets_bed"
+  cp -f "$targets_sha" "$staged_targets_sha"
+
+  # ---- unpack reference deterministically into work/refs/<bundle_id>/ ----
+  local ref_bundle_id
+  ref_bundle_id="$(basename "$staged_ref_tar" .tar.gz)"
+
+  local refs_work_base="${WORK_DIR}/refs"
+  local ref_work="${refs_work_base}/${ref_bundle_id}"
+  mkdir -p "$refs_work_base"
+
+  # unpack only if bundle dir not present
+  if [[ ! -d "$ref_work" ]]; then
+    run_cmd "untar ref bundle" tar -xzf "$staged_ref_tar" -C "$refs_work_base"
+  fi
+
+  # ---- locate FASTA + FAI ----
+  local fasta
+  fasta="$(ls -1 "${ref_work}"/genome/*.fa 2>/dev/null | head -n1 || true)"
+  [[ -n "$fasta" ]] || die "FASTA not found under: ${ref_work}/genome/*.fa"
+  local fai="${fasta}.fai"
+  [[ -s "$fai" ]] || die "missing FASTA index (.fai): $fai"
+
+  # ---- contig check: BED contigs must exist in FASTA .fai ----
+  local bed_contigs="${WORK_DIR}/bed_contigs.${SAMPLE_ID}.txt"
+  local fasta_contigs="${WORK_DIR}/fasta_contigs.${SAMPLE_ID}.txt"
+  local missing="${WORK_DIR}/contigs_missing_in_fasta.${SAMPLE_ID}.txt"
+
+  awk '{print $1}' "$staged_targets_bed" | grep -v '^#' | sort -u > "$bed_contigs"
+  awk '{print $1}' "$fai" | sort -u > "$fasta_contigs"
+
+  comm -23 "$bed_contigs" "$fasta_contigs" > "$missing" || true
+
+  if [[ -s "$missing" ]]; then
+    write_atomic "$contigs" <<EOF
+check	status	note
+bed_vs_fasta	FAIL	missing_contigs=$(wc -l < "$missing")
+EOF
+    log "ERROR: BED has contigs not in FASTA (.fai). Examples:"
+    head -n 20 "$missing" >&2
+    die "contig mismatch: BED vs FASTA"
+  else
+    write_atomic "$contigs" <<EOF
+check	status	note
+bed_vs_fasta	PASS	all_bed_contigs_in_fasta
+EOF
+  fi
+
+  # ---- write manifest used ----
+  local ref_tar_sha targets_bed_sha fasta_sha fai_sha
+  ref_tar_sha="$(sha256_of "$staged_ref_tar")"
+  targets_bed_sha="$(sha256_of "$staged_targets_bed")"
+  fasta_sha="$(sha256_of "$fasta")"
+  fai_sha="$(sha256_of "$fai")"
+
   write_atomic "$manifest" <<EOF
-{"ref_bundle_dir":"${REF_BUNDLE_DIR}","note":"placeholder; real resolver in Milestone 2"}
+{
+  "ref_bundle_id": "${ref_bundle_id}",
+  "ref_tar": "${staged_ref_tar}",
+  "ref_tar_sha256": "${ref_tar_sha}",
+  "ref_root": "${ref_work}",
+  "ref_fasta": "${fasta}",
+  "ref_fasta_sha256": "${fasta_sha}",
+  "ref_fai": "${fai}",
+  "ref_fai_sha256": "${fai_sha}",
+  "targets_bed": "${staged_targets_bed}",
+  "targets_bed_sha256": "${targets_bed_sha}"
+}
 EOF
 
   file_nonempty "$manifest" || die "step_resources failed: missing $manifest"
+  file_nonempty "$contigs" || die "step_resources failed: missing $contigs"
+# Remove legacy placeholder output (kept from earlier MVP runs)
+  rm -f "${META_DIR}/ref_bundle_manifest_used.json" || true
 }
 
 step_metadata() {
