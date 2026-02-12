@@ -133,6 +133,7 @@ step_resources() {
 
   if file_nonempty "$manifest" && file_nonempty "$contigs"; then
     log "SKIP step_resources (outputs present)"
+    rm -f "${META_DIR}/ref_bundle_manifest_used.json" || true
     return
   fi
 
