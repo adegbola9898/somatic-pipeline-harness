@@ -192,6 +192,7 @@ step_resources() {
   local manifest="${META_DIR}/bundle_manifest_used.json"
   local contigs="${META_DIR}/contig_compatibility.tsv"
 
+  # If both outputs exist, treat step as complete (idempotent)
   if file_nonempty "$manifest" && file_nonempty "$contigs"; then
     log "SKIP step_resources (outputs present)"
     rm -f "${META_DIR}/ref_bundle_manifest_used.json" || true
@@ -222,13 +223,13 @@ step_resources() {
   [[ -s "$targets_sha" ]] || die "missing targets bed sha256 sidecar: $targets_sha"
   verify_sha256_sidecar_in_dir "$(dirname "$TARGETS_BED")" "$(basename "$TARGETS_BED")" "$(basename "$targets_sha")"
 
-  # ---- stage copies into inputs/refs (provenance snapshot) ----
+  # ---- stage provenance snapshots into inputs/refs (SMALL files only) ----
   local refs_in="${INPUTS_DIR}/refs"
   mkdir -p "$refs_in"
 
-  local staged_ref_tar="${refs_in}/${ref_tar_base}"
+  # Do NOT copy the huge tar into /out. Keep using the shared mounted tar.
+  local staged_ref_tar="$ref_tar"  # verified source tar path
   local staged_ref_sha="${refs_in}/$(basename "$ref_sha")"
-  cp -f "$ref_tar" "$staged_ref_tar"
   cp -f "$ref_sha" "$staged_ref_sha"
 
   local staged_targets_bed="${refs_in}/$(basename "$TARGETS_BED")"
@@ -236,17 +237,48 @@ step_resources() {
   cp -f "$TARGETS_BED" "$staged_targets_bed"
   cp -f "$targets_sha" "$staged_targets_sha"
 
-  # ---- unpack reference deterministically into work/refs/<bundle_id>/ ----
+  # Record original source locations (human-friendly provenance)
+  write_atomic "${refs_in}/ref_sources.tsv" <<EOF
+type	path
+ref_tar	${ref_tar}
+ref_sha	${ref_sha}
+targets_bed	${TARGETS_BED}
+targets_sha	${targets_sha}
+EOF
+
+  # ---- parse tar sha256 from sidecar (avoid hashing 10GB tar) ----
+  local ref_tar_sha
+  ref_tar_sha="$(awk -v f="$ref_tar_base" '
+    $2==f || $2=="./"f || $2=="*"f {print $1}
+  ' "$staged_ref_sha" | head -n1)"
+  [[ -n "$ref_tar_sha" ]] || die "could not parse sha256 for ${ref_tar_base} from sidecar: $staged_ref_sha"
+
+  # ---- shared unpack cache (ONE unpack total across samples) ----
+  # Expect you to mount: -v /home/jupyter/ref_cache:/ref_cache
+  local refs_work_base="${REF_CACHE_DIR:-/ref_cache}"
+  refs_work_base="${refs_work_base%/}"
+  mkdir -p "$refs_work_base" 2>/dev/null || true
+  [[ -d "$refs_work_base" && -w "$refs_work_base" ]] || die \
+    "ref cache not writable: $refs_work_base (mount a host dir, e.g. -v /home/jupyter/ref_cache:/ref_cache)"
+
   local ref_bundle_id
-  ref_bundle_id="$(basename "$staged_ref_tar" .tar.gz)"
+  ref_bundle_id="$(basename "$ref_tar" .tar.gz)"
 
-  local refs_work_base="${WORK_DIR}/refs"
-  local ref_work="${refs_work_base}/${ref_bundle_id}"
-  mkdir -p "$refs_work_base"
+  local sha12="${ref_tar_sha:0:12}"
+  local ref_work="${refs_work_base}/${ref_bundle_id}-${sha12}"
 
-  # unpack only if bundle dir not present
   if [[ ! -d "$ref_work" ]]; then
-    run_cmd "untar ref bundle" tar -xzf "$staged_ref_tar" -C "$refs_work_base"
+    local tmp_extract="${refs_work_base}/.extract.${ref_bundle_id}.${sha12}.$$"
+    mkdir -p "$tmp_extract"
+
+    run_cmd "untar ref bundle" tar -xzf "$staged_ref_tar" -C "$tmp_extract"
+
+    # Expect tar contains a top-level folder named ref_bundle_id
+    local extracted="${tmp_extract}/${ref_bundle_id}"
+    [[ -d "$extracted" ]] || die "expected ${ref_bundle_id}/ inside tar, but not found under: $tmp_extract"
+
+    mv -f "$extracted" "$ref_work"
+    rm -rf "$tmp_extract"
   fi
 
   # ---- locate FASTA + FAI ----
@@ -261,7 +293,7 @@ step_resources() {
   local fasta_contigs="${WORK_DIR}/fasta_contigs.${SAMPLE_ID}.txt"
   local missing="${WORK_DIR}/contigs_missing_in_fasta.${SAMPLE_ID}.txt"
 
-  awk '{print $1}' "$staged_targets_bed" | grep -v '^#' | sort -u > "$bed_contigs"
+  awk '{print $1}' "$staged_targets_bed" | grep -v -E '^(#|$)' | sort -u > "$bed_contigs"
   awk '{print $1}' "$fai" | sort -u > "$fasta_contigs"
 
   comm -23 "$bed_contigs" "$fasta_contigs" > "$missing" || true
@@ -282,8 +314,7 @@ EOF
   fi
 
   # ---- write manifest used ----
-  local ref_tar_sha targets_bed_sha fasta_sha fai_sha
-  ref_tar_sha="$(sha256_of "$staged_ref_tar")"
+  local targets_bed_sha fasta_sha fai_sha
   targets_bed_sha="$(sha256_of "$staged_targets_bed")"
   fasta_sha="$(sha256_of "$fasta")"
   fai_sha="$(sha256_of "$fai")"
@@ -291,21 +322,25 @@ EOF
   write_atomic "$manifest" <<EOF
 {
   "ref_bundle_id": "${ref_bundle_id}",
-  "ref_tar": "${staged_ref_tar}",
+  "ref_tar": "${ref_tar}",
   "ref_tar_sha256": "${ref_tar_sha}",
+  "ref_tar_sha256_sidecar": "${staged_ref_sha}",
+  "ref_cache_dir": "${refs_work_base}",
   "ref_root": "${ref_work}",
   "ref_fasta": "${fasta}",
   "ref_fasta_sha256": "${fasta_sha}",
   "ref_fai": "${fai}",
   "ref_fai_sha256": "${fai_sha}",
   "targets_bed": "${staged_targets_bed}",
-  "targets_bed_sha256": "${targets_bed_sha}"
+  "targets_bed_sha256": "${targets_bed_sha}",
+  "targets_bed_sha256_sidecar": "${staged_targets_sha}"
 }
 EOF
 
   file_nonempty "$manifest" || die "step_resources failed: missing $manifest"
   file_nonempty "$contigs" || die "step_resources failed: missing $contigs"
-# Remove legacy placeholder output (kept from earlier MVP runs)
+
+  # Remove legacy placeholder output (kept from earlier MVP runs)
   rm -f "${META_DIR}/ref_bundle_manifest_used.json" || true
 }
 
@@ -357,8 +392,8 @@ step_ingest() {
     gzip -t "$FASTQ1" || die "FASTQ1 failed gzip -t: $FASTQ1"
     gzip -t "$FASTQ2" || die "FASTQ2 failed gzip -t: $FASTQ2"
 
-    ln -sf "$(readlink -f "$FASTQ1")" "$r1"
-    ln -sf "$(readlink -f "$FASTQ2")" "$r2"
+    stage_fastq_copy "fastq1" "$FASTQ1" "$r1"
+    stage_fastq_copy "fastq2" "$FASTQ2" "$r2"
   fi
 
   require_file "$r1"
