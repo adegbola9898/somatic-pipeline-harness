@@ -37,8 +37,6 @@ write_atomic() {
   mv -f "$tmp" "$out"
 }
 
-sha256_of() { sha256sum "$1" | awk '{print $1}'; }
-
 verify_sha256_sidecar_in_dir() {
   # expects sidecar in same directory; works with "sha  filename" format
   local dir="$1"
@@ -46,6 +44,60 @@ verify_sha256_sidecar_in_dir() {
   local sidecar="$3"
   (cd "$dir" && sha256sum -c "$sidecar") >/dev/null 2>&1 \
     || die "sha256 verification failed: dir=$dir sidecar=$sidecar"
+}
+
+# For commands that *produce an output file via stdout* (don’t use run_cmd for these)
+run_to_file() {
+  # usage: run_to_file "label" OUTFILE cmd args...
+  local label="$1"; local outfile="$2"; shift 2
+  ensure_parent "$outfile"
+  local tmp="${outfile}.tmp.$$"
+
+  log "RUN: $label"
+  log "CMD: $* > $outfile"
+
+  # Write stdout to tmp, stderr to STDERR_LOG (atomic output)
+  if ! "$@" >"$tmp" 2>>"$STDERR_LOG"; then
+    rm -f "$tmp" || true
+    die "failed: $label"
+  fi
+
+  [[ -s "$tmp" ]] || { rm -f "$tmp" || true; die "failed: $label (empty output)"; }
+  mv -f "$tmp" "$outfile"
+}
+
+# Copy FASTQ into canonical inputs dir, but skip if already staged with same sha256.
+# Refuses to overwrite if content differs (clinical-ish behavior).
+stage_fastq_copy() {
+  # usage: stage_fastq_copy "fastq1" SRC DEST
+  local label="$1" src="$2" dst="$3"
+
+  require_file "$src"
+  gzip -t "$src" >/dev/null 2>&1 || die "${label} failed gzip -t: $src"
+
+  ensure_parent "$dst"
+
+  local src_abs src_sha dst_sha
+  src_abs="$(readlink -f "$src")"
+  src_sha="$(sha256_of "$src_abs")"
+
+  if [[ -s "$dst" ]]; then
+    gzip -t "$dst" >/dev/null 2>&1 || die "existing staged ${label} is not valid gzip: $dst"
+    dst_sha="$(sha256_of "$dst")"
+    if [[ "$dst_sha" == "$src_sha" ]]; then
+      log "SKIP stage ${label} (sha256 match)"
+      return 0
+    fi
+    die "existing staged ${label} differs from source (dst_sha=$dst_sha src_sha=$src_sha). Refusing to overwrite."
+  fi
+
+  local tmp="${dst}.tmp.$$"
+  run_cmd "stage ${label}" cp -f "$src_abs" "$tmp"
+  mv -f "$tmp" "$dst"
+
+  gzip -t "$dst" >/dev/null 2>&1 || die "staged ${label} invalid gzip after copy: $dst"
+  dst_sha="$(sha256_of "$dst")"
+  [[ "$dst_sha" == "$src_sha" ]] || die "checksum mismatch after copy for ${label}"
 }
 
 # ---- CLI (minimal; will expand next milestone item) ----
