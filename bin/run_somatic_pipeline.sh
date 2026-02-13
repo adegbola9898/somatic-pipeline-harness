@@ -38,10 +38,18 @@ write_atomic() {
 }
 
 verify_sha256_sidecar_in_dir() {
-  # expects sidecar in same directory; works with "sha  filename" format
+  # usage: verify_sha256_sidecar_in_dir DIR FILE SIDECAR
   local dir="$1"
   local file="$2"
   local sidecar="$3"
+
+  require_file "${dir}/${file}"
+  require_file "${dir}/${sidecar}"
+
+  # sidecar should reference the expected file (allow " filename" or " *filename")
+  grep -Eq "([[:space:]]|\\*)${file}(\r)?$" "${dir}/${sidecar}" \
+    || die "sha256 sidecar does not reference expected file: dir=$dir file=$file sidecar=$sidecar"
+
   (cd "$dir" && sha256sum -c "$sidecar") >/dev/null 2>&1 \
     || die "sha256 verification failed: dir=$dir sidecar=$sidecar"
 }
