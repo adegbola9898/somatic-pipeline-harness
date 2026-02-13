@@ -16,6 +16,7 @@ die() { log "ERROR: $*"; exit 2; }
 
 require_cmd() { command -v "$1" >/dev/null 2>&1 || die "missing command: $1"; }
 require_file() { [[ -s "$1" ]] || die "missing/empty file: $1"; }
+sha256_of() { sha256sum "$1" | awk '{print $1}'; }
 
 # run_cmd "label" cmd args...
 run_cmd() {
@@ -248,6 +249,79 @@ EOF
   rm -f "${META_DIR}/ref_bundle_manifest_used.json" || true
 }
 
+step_ingest() {
+  local fqdir="${INPUTS_DIR}/fastq"
+  local r1="${fqdir}/${SAMPLE_ID}_R1.fastq.gz"
+  local r2="${fqdir}/${SAMPLE_ID}_R2.fastq.gz"
+  local checksums="${META_DIR}/inputs_checksums.tsv"
+
+  mkdir -p "$fqdir"
+
+  # Skip if outputs already good
+  if [[ -s "$r1" && -s "$r2" && -s "$checksums" ]]; then
+    gzip -t "$r1" && gzip -t "$r2" && { log "SKIP step_ingest (outputs present)"; return; }
+  fi
+
+  if [[ -n "$SRA" ]]; then
+    require_cmd prefetch
+    require_cmd fasterq-dump
+    require_cmd pigz
+
+    # Make sra-tools deterministic inside container
+    export HOME="${WORK_DIR}/.home"
+    mkdir -p "$HOME"
+
+    local sra_dir="${WORK_DIR}/sra"
+    local fq_work="${WORK_DIR}/fastq_tmp"
+    mkdir -p "$sra_dir" "$fq_work"
+
+    run_cmd "prefetch" prefetch --output-directory "$sra_dir" "$SRA"
+
+    local sra_file
+    sra_file="$(find "$sra_dir" -type f -name '*.sra' | head -n 1)"
+    [[ -s "$sra_file" ]] || die "prefetch produced no .sra under: $sra_dir"
+
+    run_cmd "fasterq-dump" fasterq-dump --split-files -e "$THREADS" -O "$fq_work" "$sra_file"
+
+    local u1 u2
+    u1="$(ls -1 "$fq_work"/*_1.fastq 2>/dev/null | head -n 1)"
+    u2="$(ls -1 "$fq_work"/*_2.fastq 2>/dev/null | head -n 1)"
+    [[ -s "$u1" && -s "$u2" ]] || die "fasterq-dump did not produce *_1.fastq/*_2.fastq in: $fq_work"
+
+    run_cmd "pigz R1" pigz -p "$THREADS" -c "$u1" > "$r1"
+    run_cmd "pigz R2" pigz -p "$THREADS" -c "$u2" > "$r2"
+
+  else
+    require_file "$FASTQ1"
+    require_file "$FASTQ2"
+    gzip -t "$FASTQ1" || die "FASTQ1 failed gzip -t: $FASTQ1"
+    gzip -t "$FASTQ2" || die "FASTQ2 failed gzip -t: $FASTQ2"
+
+    ln -sf "$(readlink -f "$FASTQ1")" "$r1"
+    ln -sf "$(readlink -f "$FASTQ2")" "$r2"
+  fi
+
+  require_file "$r1"
+  require_file "$r2"
+  gzip -t "$r1" || die "R1 failed gzip -t after ingest: $r1"
+  gzip -t "$r2" || die "R2 failed gzip -t after ingest: $r2"
+
+  {
+    echo -e "type\tpath\tsha256\tsource"
+    if [[ -n "$SRA" ]]; then
+      echo -e "sra\t${SRA}\tNA\t${SRA}"
+      echo -e "fastq1\t${r1}\t$(sha256_of "$r1")\t${SRA}"
+      echo -e "fastq2\t${r2}\t$(sha256_of "$r2")\t${SRA}"
+    else
+      echo -e "fastq1\t${r1}\t$(sha256_of "$r1")\t${FASTQ1}"
+      echo -e "fastq2\t${r2}\t$(sha256_of "$r2")\t${FASTQ2}"
+    fi
+  } > "$checksums"
+
+  require_file "$checksums"
+  log "RUN step_ingest"
+}
+
 step_metadata() {
   local meta="${META_DIR}/run_metadata.json"
 
@@ -296,7 +370,7 @@ for c in samtools bcftools gatk bwa-mem2 fastp; do require_cmd "$c"; done
 
 # ---- placeholder steps ----
 step_resources
-log "TODO: step_ingest"
+step_ingest
 log "TODO: step_fastp"
 log "TODO: step_align"
 log "TODO: step_mutect_call/filter"
