@@ -352,45 +352,86 @@ step_ingest() {
 
   mkdir -p "$fqdir"
 
-  # Skip if outputs already good
+  # ---- Skip ONLY if outputs are valid AND match requested inputs by CONTENT ----
   if [[ -s "$r1" && -s "$r2" && -s "$checksums" ]]; then
-    gzip -t "$r1" && gzip -t "$r2" && { log "SKIP step_ingest (outputs present)"; return; }
+    gzip -t "$r1" >/dev/null 2>&1 || die "existing R1 failed gzip -t: $r1"
+    gzip -t "$r2" >/dev/null 2>&1 || die "existing R2 failed gzip -t: $r2"
+
+    if [[ -n "$SRA" ]]; then
+      grep -Fq $'sra\t'"${SRA}"$'\t' "$checksums" \
+        || die "existing ingest outputs were generated from a different SRA (delete inputs/fastq + inputs_checksums.tsv to re-run)"
+    else
+      require_file "$FASTQ1"
+      require_file "$FASTQ2"
+
+      local have1_sha have2_sha cur1_sha cur2_sha
+      have1_sha="$(awk -F'\t' '$1=="fastq1"{print $3}' "$checksums" | head -n1)"
+      have2_sha="$(awk -F'\t' '$1=="fastq2"{print $3}' "$checksums" | head -n1)"
+      cur1_sha="$(sha256_of "$(readlink -f "$FASTQ1")")"
+      cur2_sha="$(sha256_of "$(readlink -f "$FASTQ2")")"
+
+      [[ "$have1_sha" == "$cur1_sha" && "$have2_sha" == "$cur2_sha" ]] \
+        || die "existing ingest outputs were generated from different FASTQ contents (delete inputs/fastq + inputs_checksums.tsv to re-run)"
+    fi
+
+    log "SKIP step_ingest (outputs present)"
+    return
   fi
+
+  log "RUN step_ingest"
 
   if [[ -n "$SRA" ]]; then
     require_cmd prefetch
     require_cmd fasterq-dump
     require_cmd pigz
 
-    # Make sra-tools deterministic inside container
+    # deterministic sra-tools config location (no writes to /root)
     export HOME="${WORK_DIR}/.home"
     mkdir -p "$HOME"
 
     local sra_dir="${WORK_DIR}/sra"
     local fq_work="${WORK_DIR}/fastq_tmp"
+    rm -rf "$fq_work"
     mkdir -p "$sra_dir" "$fq_work"
 
     run_cmd "prefetch" prefetch --output-directory "$sra_dir" "$SRA"
 
-    local sra_file
-    sra_file="$(find "$sra_dir" -type f -name '*.sra' | head -n 1)"
+    # Prefer the expected location first, then fallback to find
+    local sra_file=""
+    if [[ -s "${sra_dir}/${SRA}/${SRA}.sra" ]]; then
+      sra_file="${sra_dir}/${SRA}/${SRA}.sra"
+    elif [[ -s "${sra_dir}/${SRA}.sra" ]]; then
+      sra_file="${sra_dir}/${SRA}.sra"
+    else
+      sra_file="$(find "$sra_dir" -type f -name '*.sra' | head -n 1 || true)"
+    fi
     [[ -s "$sra_file" ]] || die "prefetch produced no .sra under: $sra_dir"
 
     run_cmd "fasterq-dump" fasterq-dump --split-files -e "$THREADS" -O "$fq_work" "$sra_file"
 
-    local u1 u2
-    u1="$(ls -1 "$fq_work"/*_1.fastq 2>/dev/null | head -n 1)"
-    u2="$(ls -1 "$fq_work"/*_2.fastq 2>/dev/null | head -n 1)"
+    local u1 u2 u3
+    u1="$(ls -1 "$fq_work"/*_1.fastq 2>/dev/null | head -n 1 || true)"
+    u2="$(ls -1 "$fq_work"/*_2.fastq 2>/dev/null | head -n 1 || true)"
+    u3="$(ls -1 "$fq_work"/*_3.fastq 2>/dev/null | head -n 1 || true)"
     [[ -s "$u1" && -s "$u2" ]] || die "fasterq-dump did not produce *_1.fastq/*_2.fastq in: $fq_work"
 
-    run_cmd "pigz R1" pigz -p "$THREADS" -c "$u1" > "$r1"
-    run_cmd "pigz R2" pigz -p "$THREADS" -c "$u2" > "$r2"
+    run_to_file "pigz R1" "$r1" pigz -p "$THREADS" -c "$u1"
+    run_to_file "pigz R2" "$r2" pigz -p "$THREADS" -c "$u2"
+
+    # If unpaired exists, decide policy (here: delete after noting)
+    if [[ -n "$u3" && -s "$u3" ]]; then
+      log "NOTE: fasterq-dump produced unpaired *_3.fastq (deleting): $u3"
+      rm -f "$u3" || true
+    fi
+
+    rm -f "$u1" "$u2" || true
+    rmdir "$fq_work" 2>/dev/null || true
 
   else
     require_file "$FASTQ1"
     require_file "$FASTQ2"
-    gzip -t "$FASTQ1" || die "FASTQ1 failed gzip -t: $FASTQ1"
-    gzip -t "$FASTQ2" || die "FASTQ2 failed gzip -t: $FASTQ2"
+    gzip -t "$FASTQ1" >/dev/null 2>&1 || die "FASTQ1 failed gzip -t: $FASTQ1"
+    gzip -t "$FASTQ2" >/dev/null 2>&1 || die "FASTQ2 failed gzip -t: $FASTQ2"
 
     stage_fastq_copy "fastq1" "$FASTQ1" "$r1"
     stage_fastq_copy "fastq2" "$FASTQ2" "$r2"
@@ -398,23 +439,22 @@ step_ingest() {
 
   require_file "$r1"
   require_file "$r2"
-  gzip -t "$r1" || die "R1 failed gzip -t after ingest: $r1"
-  gzip -t "$r2" || die "R2 failed gzip -t after ingest: $r2"
+  gzip -t "$r1" >/dev/null 2>&1 || die "R1 failed gzip -t after ingest: $r1"
+  gzip -t "$r2" >/dev/null 2>&1 || die "R2 failed gzip -t after ingest: $r2"
 
-  {
-    echo -e "type\tpath\tsha256\tsource"
-    if [[ -n "$SRA" ]]; then
-      echo -e "sra\t${SRA}\tNA\t${SRA}"
-      echo -e "fastq1\t${r1}\t$(sha256_of "$r1")\t${SRA}"
-      echo -e "fastq2\t${r2}\t$(sha256_of "$r2")\t${SRA}"
-    else
-      echo -e "fastq1\t${r1}\t$(sha256_of "$r1")\t${FASTQ1}"
-      echo -e "fastq2\t${r2}\t$(sha256_of "$r2")\t${FASTQ2}"
-    fi
-  } > "$checksums"
+  write_atomic "$checksums" <<EOF
+type	path	sha256	source
+$(if [[ -n "$SRA" ]]; then
+    printf "sra\t%s\tNA\t%s\n" "$SRA" "$SRA"
+    printf "fastq1\t%s\t%s\t%s\n" "$r1" "$(sha256_of "$r1")" "$SRA"
+    printf "fastq2\t%s\t%s\t%s\n" "$r2" "$(sha256_of "$r2")" "$SRA"
+  else
+    printf "fastq1\t%s\t%s\t%s\n" "$r1" "$(sha256_of "$r1")" "$FASTQ1"
+    printf "fastq2\t%s\t%s\t%s\n" "$r2" "$(sha256_of "$r2")" "$FASTQ2"
+  fi)
+EOF
 
   require_file "$checksums"
-  log "RUN step_ingest"
 }
 
 step_metadata() {
