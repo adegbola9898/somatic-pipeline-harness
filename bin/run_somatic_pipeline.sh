@@ -357,16 +357,24 @@ step_ingest() {
     gzip -t "$r1" >/dev/null 2>&1 || die "existing R1 failed gzip -t: $r1"
     gzip -t "$r2" >/dev/null 2>&1 || die "existing R2 failed gzip -t: $r2"
 
+    # checksums must agree with staged files (protect against “valid gzip but wrong content”)
+    local have1_sha have2_sha
+    have1_sha="$(awk -F'\t' '$1=="fastq1"{print $3}' "$checksums" | head -n1)"
+    have2_sha="$(awk -F'\t' '$1=="fastq2"{print $3}' "$checksums" | head -n1)"
+    [[ -n "$have1_sha" && -n "$have2_sha" ]] || die "inputs_checksums.tsv missing fastq1/fastq2 sha256 rows: $checksums"
+
+    [[ "$(sha256_of "$r1")" == "$have1_sha" ]] || die "existing staged R1 sha256 != recorded (delete inputs/fastq + inputs_checksums.tsv to re-run)"
+    [[ "$(sha256_of "$r2")" == "$have2_sha" ]] || die "existing staged R2 sha256 != recorded (delete inputs/fastq + inputs_checksums.tsv to re-run)"
+
     if [[ -n "$SRA" ]]; then
-      grep -Fq $'sra\t'"${SRA}"$'\t' "$checksums" \
+      # strict field match for the SRA row
+      awk -F'\t' -v sra="$SRA" '$1=="sra" && $2==sra {found=1} END{exit(found?0:1)}' "$checksums" \
         || die "existing ingest outputs were generated from a different SRA (delete inputs/fastq + inputs_checksums.tsv to re-run)"
     else
       require_file "$FASTQ1"
       require_file "$FASTQ2"
 
-      local have1_sha have2_sha cur1_sha cur2_sha
-      have1_sha="$(awk -F'\t' '$1=="fastq1"{print $3}' "$checksums" | head -n1)"
-      have2_sha="$(awk -F'\t' '$1=="fastq2"{print $3}' "$checksums" | head -n1)"
+      local cur1_sha cur2_sha
       cur1_sha="$(sha256_of "$(readlink -f "$FASTQ1")")"
       cur2_sha="$(sha256_of "$(readlink -f "$FASTQ2")")"
 
@@ -385,7 +393,6 @@ step_ingest() {
     require_cmd fasterq-dump
     require_cmd pigz
 
-    # deterministic sra-tools config location (no writes to /root)
     export HOME="${WORK_DIR}/.home"
     mkdir -p "$HOME"
 
@@ -396,7 +403,6 @@ step_ingest() {
 
     run_cmd "prefetch" prefetch --output-directory "$sra_dir" "$SRA"
 
-    # Prefer the expected location first, then fallback to find
     local sra_file=""
     if [[ -s "${sra_dir}/${SRA}/${SRA}.sra" ]]; then
       sra_file="${sra_dir}/${SRA}/${SRA}.sra"
@@ -418,12 +424,10 @@ step_ingest() {
     run_to_file "pigz R1" "$r1" pigz -p "$THREADS" -c "$u1"
     run_to_file "pigz R2" "$r2" pigz -p "$THREADS" -c "$u2"
 
-    # If unpaired exists, decide policy (here: delete after noting)
     if [[ -n "$u3" && -s "$u3" ]]; then
       log "NOTE: fasterq-dump produced unpaired *_3.fastq (deleting): $u3"
       rm -f "$u3" || true
     fi
-
     rm -f "$u1" "$u2" || true
     rmdir "$fq_work" 2>/dev/null || true
 
