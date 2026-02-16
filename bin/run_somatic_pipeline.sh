@@ -54,6 +54,28 @@ verify_sha256_sidecar_in_dir() {
     || die "sha256 verification failed: dir=$dir sidecar=$sidecar"
 }
 
+json_get_simple() {
+  # usage: json_get_simple KEY FILE
+  # only works for simple "key": "value" fields (your manifest format)
+  local key="$1" file="$2"
+  sed -n -E 's/^[[:space:]]*"'${key}'"[[:space:]]*:[[:space:]]*"([^"]*)".*$/\1/p' "$file" | head -n1
+}
+
+require_single_glob() {
+  # usage: require_single_glob "desc" "/path/pattern"
+  local desc="$1" pattern="$2"
+  local -a matches=()
+  while IFS= read -r p; do matches+=("$p"); done < <(compgen -G "$pattern" || true)
+
+  if (( ${#matches[@]} == 0 )); then
+    die "no ${desc} found (pattern: $pattern)"
+  fi
+  if (( ${#matches[@]} > 1 )); then
+    die "multiple ${desc} found (refuse nondeterminism): ${matches[*]}"
+  fi
+  echo "${matches[0]}"
+}
+
 # For commands that *produce an output file via stdout* (don’t use run_cmd for these)
 run_to_file() {
   # usage: run_to_file "label" OUTFILE cmd args...
@@ -192,21 +214,11 @@ step_resources() {
   local manifest="${META_DIR}/bundle_manifest_used.json"
   local contigs="${META_DIR}/contig_compatibility.tsv"
 
-  # If both outputs exist, treat step as complete (idempotent)
-  if file_nonempty "$manifest" && file_nonempty "$contigs"; then
-    log "SKIP step_resources (outputs present)"
-    rm -f "${META_DIR}/ref_bundle_manifest_used.json" || true
-    return
-  fi
-
-  log "RUN step_resources"
-
-  # ---- find reference tar + sha256 sidecar in ref dir ----
+  # ---- find reference tar + sha256 sidecar in ref dir (deterministic) ----
   [[ -d "$REF_BUNDLE_DIR" ]] || die "ref bundle dir not found: $REF_BUNDLE_DIR"
 
   local ref_tar
-  ref_tar="$(ls -1 "${REF_BUNDLE_DIR%/}"/*.tar.gz 2>/dev/null | head -n1 || true)"
-  [[ -n "$ref_tar" ]] || die "no reference *.tar.gz found in: $REF_BUNDLE_DIR"
+  ref_tar="$(require_single_glob "reference *.tar.gz" "${REF_BUNDLE_DIR%/}/*.tar.gz")"
 
   local ref_tar_base
   ref_tar_base="$(basename "$ref_tar")"
@@ -222,6 +234,37 @@ step_resources() {
   local targets_sha="${TARGETS_BED}.sha256"
   [[ -s "$targets_sha" ]] || die "missing targets bed sha256 sidecar: $targets_sha"
   verify_sha256_sidecar_in_dir "$(dirname "$TARGETS_BED")" "$(basename "$TARGETS_BED")" "$(basename "$targets_sha")"
+
+  # ---- parse tar sha256 from sidecar (avoid hashing huge tar) ----
+  local ref_tar_sha
+  ref_tar_sha="$(awk -v f="$ref_tar_base" '
+    $2==f || $2=="./"f || $2=="*"f {print $1}
+  ' "$ref_sha" | head -n1)"
+  [[ -n "$ref_tar_sha" ]] || die "could not parse sha256 for ${ref_tar_base} from sidecar: $ref_sha"
+
+  # ---- compute current targets sha (BED is small; OK to hash) ----
+  local targets_bed_sha_cur
+  targets_bed_sha_cur="$(sha256_of "$TARGETS_BED")"
+
+  # ---- Content-aware skip: only skip if manifest matches current tar+targets ----
+  if file_nonempty "$manifest" && file_nonempty "$contigs"; then
+    local have_ref_sha have_targets_sha
+    have_ref_sha="$(json_get_simple "ref_tar_sha256" "$manifest")"
+    have_targets_sha="$(json_get_simple "targets_bed_sha256" "$manifest")"
+    [[ -n "$have_ref_sha" && -n "$have_targets_sha" ]] || die "manifest missing sha fields: $manifest"
+
+    [[ "$have_ref_sha" == "$ref_tar_sha" ]] || die \
+      "existing step_resources outputs correspond to DIFFERENT ref tar sha (have=$have_ref_sha cur=$ref_tar_sha). Delete $manifest and $contigs to re-run."
+
+    [[ "$have_targets_sha" == "$targets_bed_sha_cur" ]] || die \
+      "existing step_resources outputs correspond to DIFFERENT targets bed sha (have=$have_targets_sha cur=$targets_bed_sha_cur). Delete $manifest and $contigs to re-run."
+
+    log "SKIP step_resources (outputs present + resource shas match)"
+    rm -f "${META_DIR}/ref_bundle_manifest_used.json" || true
+    return
+  fi
+
+  log "RUN step_resources"
 
   # ---- stage provenance snapshots into inputs/refs (SMALL files only) ----
   local refs_in="${INPUTS_DIR}/refs"
@@ -239,19 +282,12 @@ step_resources() {
 
   # Record original source locations (human-friendly provenance)
   write_atomic "${refs_in}/ref_sources.tsv" <<EOF
-type	path
-ref_tar	${ref_tar}
-ref_sha	${ref_sha}
-targets_bed	${TARGETS_BED}
-targets_sha	${targets_sha}
+type    path
+ref_tar ${ref_tar}
+ref_sha ${ref_sha}
+targets_bed     ${TARGETS_BED}
+targets_sha     ${targets_sha}
 EOF
-
-  # ---- parse tar sha256 from sidecar (avoid hashing 10GB tar) ----
-  local ref_tar_sha
-  ref_tar_sha="$(awk -v f="$ref_tar_base" '
-    $2==f || $2=="./"f || $2=="*"f {print $1}
-  ' "$staged_ref_sha" | head -n1)"
-  [[ -n "$ref_tar_sha" ]] || die "could not parse sha256 for ${ref_tar_base} from sidecar: $staged_ref_sha"
 
   # ---- shared unpack cache (ONE unpack total across samples) ----
   # Expect you to mount: -v /home/jupyter/ref_cache:/ref_cache
@@ -281,10 +317,9 @@ EOF
     rm -rf "$tmp_extract"
   fi
 
-  # ---- locate FASTA + FAI ----
+  # ---- locate FASTA + FAI (still minimal; deterministic if exactly one) ----
   local fasta
-  fasta="$(ls -1 "${ref_work}"/genome/*.fa 2>/dev/null | head -n1 || true)"
-  [[ -n "$fasta" ]] || die "FASTA not found under: ${ref_work}/genome/*.fa"
+  fasta="$(require_single_glob "FASTA under ${ref_work}/genome" "${ref_work}/genome/*.fa")"
   local fai="${fasta}.fai"
   [[ -s "$fai" ]] || die "missing FASTA index (.fai): $fai"
 
@@ -300,16 +335,16 @@ EOF
 
   if [[ -s "$missing" ]]; then
     write_atomic "$contigs" <<EOF
-check	status	note
-bed_vs_fasta	FAIL	missing_contigs=$(wc -l < "$missing")
+check   status  note
+bed_vs_fasta    FAIL    missing_contigs=$(wc -l < "$missing")
 EOF
     log "ERROR: BED has contigs not in FASTA (.fai). Examples:"
     head -n 20 "$missing" >&2
     die "contig mismatch: BED vs FASTA"
   else
     write_atomic "$contigs" <<EOF
-check	status	note
-bed_vs_fasta	PASS	all_bed_contigs_in_fasta
+check   status  note
+bed_vs_fasta    PASS    all_bed_contigs_in_fasta
 EOF
   fi
 
