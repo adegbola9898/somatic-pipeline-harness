@@ -596,6 +596,79 @@ step_fastp() {
   require_file "$html_out"
 }
 
+step_align() {
+  local bam_dir="${RESULTS_DIR}/bam"
+  mkdir -p "$bam_dir"
+
+  local qc_flagstat="${QC_DIR}/${SAMPLE_ID}.flagstat.txt"
+
+  local bam="${bam_dir}/${SAMPLE_ID}.sorted.markdup.bam"
+  local bai="${bam}.bai"
+
+  # pick input fastqs: prefer fastp outputs
+  local r1="${WORK_DIR}/fastp/${SAMPLE_ID}_R1.fastq.gz"
+  local r2="${WORK_DIR}/fastp/${SAMPLE_ID}_R2.fastq.gz"
+  if [[ ! -s "$r1" || ! -s "$r2" ]]; then
+    r1="${INPUTS_DIR}/fastq/${SAMPLE_ID}_R1.fastq.gz"
+    r2="${INPUTS_DIR}/fastq/${SAMPLE_ID}_R2.fastq.gz"
+  fi
+  require_file "$r1"
+  require_file "$r2"
+  gzip -t "$r1" >/dev/null 2>&1 || die "R1 failed gzip -t: $r1"
+  gzip -t "$r2" >/dev/null 2>&1 || die "R2 failed gzip -t: $r2"
+
+  # read ref paths from manifest (single source of truth)
+  local manifest="${META_DIR}/bundle_manifest_used.json"
+  require_file "$manifest"
+  local ref_fasta
+  ref_fasta="$(json_get_simple "ref_fasta" "$manifest")"
+  [[ -n "$ref_fasta" ]] || die "manifest missing ref_fasta: $manifest"
+  require_file "$ref_fasta"
+  require_file "${ref_fasta}.fai"
+
+  # Idempotent skip
+  if [[ -s "$bam" && -s "$bai" ]]; then
+    if samtools quickcheck -v "$bam" >/dev/null 2>&1; then
+      log "SKIP step_align (outputs present)"
+      return
+    fi
+    die "existing BAM failed samtools quickcheck -v: $bam (delete $bam and $bai to re-run)"
+  fi
+
+  log "RUN step_align"
+
+  rm -f "$bam" "$bai" "$qc_flagstat"
+
+  # stable RG
+  local rg="@RG\tID:${SAMPLE_ID}\tSM:${SAMPLE_ID}\tPL:ILLUMINA"
+
+  # temp files
+  local sam_tmp="${WORK_DIR}/align.${SAMPLE_ID}.sam"
+  local bam_tmp="${WORK_DIR}/align.${SAMPLE_ID}.bam"
+  local sorted_tmp="${WORK_DIR}/align.${SAMPLE_ID}.sorted.bam"
+
+  # NOTE: This is a reasonable default “port v2 unchanged first” skeleton.
+  # If your v2 uses different exact commands/flags (e.g. samtools markdup -s, fixmate),
+  # swap those in verbatim later.
+  run_cmd "bwa-mem2 mem" bwa-mem2 mem -t "$THREADS" -R "$rg" "$ref_fasta" "$r1" "$r2" > "$sam_tmp"
+  run_cmd "samtools view" samtools view -@ "$THREADS" -bS "$sam_tmp" > "$bam_tmp"
+  run_cmd "samtools sort" samtools sort -@ "$THREADS" -o "$sorted_tmp" "$bam_tmp"
+
+  # markdup requires coordinate-sorted input; include -r? depends on v2; keep minimal:
+  run_cmd "samtools markdup" samtools markdup -@ "$THREADS" "$sorted_tmp" "$bam"
+  run_cmd "samtools index" samtools index -@ "$THREADS" "$bam" "$bai"
+
+  # qc
+  run_cmd "samtools flagstat" samtools flagstat -@ "$THREADS" "$bam" > "$qc_flagstat"
+
+  # validations
+  samtools quickcheck -v "$bam" >/dev/null 2>&1 || die "samtools quickcheck failed: $bam"
+  require_file "$qc_flagstat"
+
+  # cleanup big temps (optional)
+  rm -f "$sam_tmp" "$bam_tmp" "$sorted_tmp"
+}
+
 step_metadata() {
   local meta="${META_DIR}/run_metadata.json"
 
@@ -646,7 +719,7 @@ for c in samtools bcftools gatk bwa-mem2 fastp; do require_cmd "$c"; done
 step_resources
 step_ingest
 step_fastp
-log "TODO: step_align"
+step_align
 log "TODO: step_mutect_call/filter"
 log "TODO: step_qc"
 step_metadata
