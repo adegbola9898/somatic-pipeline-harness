@@ -549,6 +549,53 @@ EOF
   require_file "$checksums"
 }
 
+step_fastp() {
+  local in_dir="${INPUTS_DIR}/fastq"
+  local r1_in="${in_dir}/${SAMPLE_ID}_R1.fastq.gz"
+  local r2_in="${in_dir}/${SAMPLE_ID}_R2.fastq.gz"
+
+  local fp_work="${WORK_DIR}/fastp"
+  local fp_qc="${QC_DIR}/fastp"
+  mkdir -p "$fp_work" "$fp_qc"
+
+  local r1_out="${fp_work}/${SAMPLE_ID}_R1.fastq.gz"
+  local r2_out="${fp_work}/${SAMPLE_ID}_R2.fastq.gz"
+  local json_out="${fp_qc}/${SAMPLE_ID}.fastp.json"
+  local html_out="${fp_qc}/${SAMPLE_ID}.fastp.html"
+
+  # Idempotent skip (basic)
+  if [[ -s "$r1_out" && -s "$r2_out" && -s "$json_out" && -s "$html_out" ]]; then
+    gzip -t "$r1_out" >/dev/null 2>&1 || die "existing fastp R1 output failed gzip -t: $r1_out"
+    gzip -t "$r2_out" >/dev/null 2>&1 || die "existing fastp R2 output failed gzip -t: $r2_out"
+    log "SKIP step_fastp (outputs present)"
+    return
+  fi
+
+  log "RUN step_fastp"
+  require_file "$r1_in"
+  require_file "$r2_in"
+  gzip -t "$r1_in" >/dev/null 2>&1 || die "input R1 failed gzip -t: $r1_in"
+  gzip -t "$r2_in" >/dev/null 2>&1 || die "input R2 failed gzip -t: $r2_in"
+
+  # Clean partial outputs to avoid mixing states
+  rm -f "$r1_out" "$r2_out" "$json_out" "$html_out"
+
+  # Minimal “v2 unchanged first” stance: no extra flags unless you already had them in v2.
+  # Threading uses --thread.
+  run_cmd "fastp" fastp \
+    --in1 "$r1_in" --in2 "$r2_in" \
+    --out1 "$r1_out" --out2 "$r2_out" \
+    --json "$json_out" --html "$html_out" \
+    --thread "$THREADS"
+
+  require_file "$r1_out"
+  require_file "$r2_out"
+  gzip -t "$r1_out" >/dev/null 2>&1 || die "fastp R1 output failed gzip -t: $r1_out"
+  gzip -t "$r2_out" >/dev/null 2>&1 || die "fastp R2 output failed gzip -t: $r2_out"
+  require_file "$json_out"
+  require_file "$html_out"
+}
+
 step_metadata() {
   local meta="${META_DIR}/run_metadata.json"
 
@@ -598,7 +645,7 @@ for c in samtools bcftools gatk bwa-mem2 fastp; do require_cmd "$c"; done
 # ---- placeholder steps ----
 step_resources
 step_ingest
-log "TODO: step_fastp"
+step_fastp
 log "TODO: step_align"
 log "TODO: step_mutect_call/filter"
 log "TODO: step_qc"
