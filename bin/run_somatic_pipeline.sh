@@ -18,6 +18,53 @@ require_cmd() { command -v "$1" >/dev/null 2>&1 || die "missing command: $1"; }
 require_file() { [[ -s "$1" ]] || die "missing/empty file: $1"; }
 sha256_of() { sha256sum "$1" | awk '{print $1}'; }
 
+ensure_ref_prereqs() {
+  # usage: ensure_ref_prereqs FASTA
+  # Verifies: FASTA .fai, GATK .dict, bwa-mem2 index files.
+  # Prints resolved dict path to stdout.
+  local fasta="$1"
+
+  local fai="${fasta}.fai"
+  [[ -s "$fai" ]] || die "missing FASTA index (.fai): $fai"
+
+  # Accept either ref.dict (common) or ref.fa.dict (less common)
+  local dict1="${fasta%.*}.dict"
+  local dict2="${fasta}.dict"
+  local dict=""
+  if [[ -s "$dict1" ]]; then
+    dict="$dict1"
+  elif [[ -s "$dict2" ]]; then
+    dict="$dict2"
+  else
+    die "missing GATK sequence dictionary (.dict) for FASTA. Expected: $dict1 (or $dict2)"
+  fi
+
+  # bwa-mem2 index files: different builds may emit slightly different bwt name variants
+  local -a missing=()
+
+  for ext in .0123 .amb .ann .pac; do
+    [[ -s "${fasta}${ext}" ]] || missing+=("${fasta}${ext}")
+  done
+
+  # bwt file name differs across some bwa-mem2 builds; accept any of these
+  local have_bwt=0
+  for bwt in "${fasta}.bwt.2bit.64" "${fasta}.bwt.2bit.32" "${fasta}.bwt.2bit"; do
+    if [[ -s "$bwt" ]]; then
+      have_bwt=1
+      break
+    fi
+  done
+  if (( have_bwt == 0 )); then
+    missing+=("${fasta}.bwt.2bit.64 (or .32/.bwt.2bit)")
+  fi
+
+  if (( ${#missing[@]} > 0 )); then
+    die "missing bwa-mem2 index files for FASTA (run bwa-mem2 index). Missing: ${missing[*]}"
+  fi
+
+  echo "$dict"
+}
+
 # run_cmd "label" cmd args...
 run_cmd() {
   local label="$1"; shift
@@ -320,8 +367,10 @@ EOF
   # ---- locate FASTA + FAI (still minimal; deterministic if exactly one) ----
   local fasta
   fasta="$(require_single_glob "FASTA under ${ref_work}/genome" "${ref_work}/genome/*.fa")"
+  # ---- prereqs: .fai + .dict + bwa-mem2 indices ----
+  local dict
+  dict="$(ensure_ref_prereqs "$fasta")"
   local fai="${fasta}.fai"
-  [[ -s "$fai" ]] || die "missing FASTA index (.fai): $fai"
 
   # ---- contig check: BED contigs must exist in FASTA .fai ----
   local bed_contigs="${WORK_DIR}/bed_contigs.${SAMPLE_ID}.txt"
@@ -349,10 +398,11 @@ EOF
   fi
 
   # ---- write manifest used ----
-  local targets_bed_sha fasta_sha fai_sha
+  local targets_bed_sha fasta_sha fai_sha dict_sha
   targets_bed_sha="$(sha256_of "$staged_targets_bed")"
   fasta_sha="$(sha256_of "$fasta")"
   fai_sha="$(sha256_of "$fai")"
+  dict_sha="$(sha256_of "$dict")"
 
   write_atomic "$manifest" <<EOF
 {
@@ -365,6 +415,9 @@ EOF
   "ref_fasta": "${fasta}",
   "ref_fasta_sha256": "${fasta_sha}",
   "ref_fai": "${fai}",
+  "ref_dict": "${dict}",
+  "ref_dict_sha256": "${dict_sha}",
+  "bwa_mem2_prefix": "${fasta}",
   "ref_fai_sha256": "${fai_sha}",
   "targets_bed": "${staged_targets_bed}",
   "targets_bed_sha256": "${targets_bed_sha}",
