@@ -597,12 +597,13 @@ step_fastp() {
 }
 
 step_align() {
-  local bam_dir="${RESULTS_DIR}/bam"
-  mkdir -p "$bam_dir"
+  require_cmd bwa-mem2
+  require_cmd samtools
+
+  mkdir -p "${RESULTS_DIR}/bam" "$QC_DIR"
 
   local qc_flagstat="${QC_DIR}/${SAMPLE_ID}.flagstat.txt"
-
-  local bam="${bam_dir}/${SAMPLE_ID}.sorted.markdup.bam"
+  local bam="${RESULTS_DIR}/bam/${SAMPLE_ID}.sorted.markdup.bam"
   local bai="${bam}.bai"
 
   # pick input fastqs: prefer fastp outputs
@@ -617,7 +618,7 @@ step_align() {
   gzip -t "$r1" >/dev/null 2>&1 || die "R1 failed gzip -t: $r1"
   gzip -t "$r2" >/dev/null 2>&1 || die "R2 failed gzip -t: $r2"
 
-  # read ref paths from manifest (single source of truth)
+  # read ref paths from manifest
   local manifest="${META_DIR}/bundle_manifest_used.json"
   require_file "$manifest"
   local ref_fasta
@@ -636,37 +637,31 @@ step_align() {
   fi
 
   log "RUN step_align"
-
   rm -f "$bam" "$bai" "$qc_flagstat"
 
-  # stable RG
-  local rg="@RG\tID:${SAMPLE_ID}\tSM:${SAMPLE_ID}\tPL:ILLUMINA"
+  local tmp_pfx="${WORK_DIR}/tmp.${SAMPLE_ID}"
 
-  # temp files
-  local sam_tmp="${WORK_DIR}/align.${SAMPLE_ID}.sam"
-  local bam_tmp="${WORK_DIR}/align.${SAMPLE_ID}.bam"
-  local sorted_tmp="${WORK_DIR}/align.${SAMPLE_ID}.sorted.bam"
+  run_cmd "align+markdup" env \
+    THREADS="$THREADS" SID="$SAMPLE_ID" REF="$ref_fasta" R1="$r1" R2="$r2" OUTBAM="$bam" TMPPFX="$tmp_pfx" \
+    bash -c '
+      set -euo pipefail
+      RG="$(printf "%b" "@RG\tID:${SID}\tSM:${SID}\tPL:ILLUMINA")"
 
-  # NOTE: This is a reasonable default “port v2 unchanged first” skeleton.
-  # If your v2 uses different exact commands/flags (e.g. samtools markdup -s, fixmate),
-  # swap those in verbatim later.
-  run_cmd "bwa-mem2 mem" bwa-mem2 mem -t "$THREADS" -R "$rg" "$ref_fasta" "$r1" "$r2" > "$sam_tmp"
-  run_cmd "samtools view" samtools view -@ "$THREADS" -bS "$sam_tmp" > "$bam_tmp"
-  run_cmd "samtools sort" samtools sort -@ "$THREADS" -o "$sorted_tmp" "$bam_tmp"
+      bwa-mem2 mem -t "$THREADS" -R "$RG" "$REF" "$R1" "$R2" \
+      | samtools view -@ "$THREADS" -b - \
+      | samtools sort -@ "$THREADS" -n -T "${TMPPFX}.ns" - \
+      | samtools fixmate -m - - \
+      | samtools sort -@ "$THREADS" -T "${TMPPFX}.cs" - \
+      | samtools markdup -@ "$THREADS" - "$OUTBAM"
+    '
 
-  # markdup requires coordinate-sorted input; include -r? depends on v2; keep minimal:
-  run_cmd "samtools markdup" samtools markdup -@ "$THREADS" "$sorted_tmp" "$bam"
   run_cmd "samtools index" samtools index -@ "$THREADS" "$bam" "$bai"
 
-  # qc
-  run_cmd "samtools flagstat" samtools flagstat -@ "$THREADS" "$bam" > "$qc_flagstat"
+  # IMPORTANT: use run_to_file (run_cmd captures stdout)
+  run_to_file "samtools flagstat" "$qc_flagstat" samtools flagstat -@ "$THREADS" "$bam"
 
-  # validations
   samtools quickcheck -v "$bam" >/dev/null 2>&1 || die "samtools quickcheck failed: $bam"
   require_file "$qc_flagstat"
-
-  # cleanup big temps (optional)
-  rm -f "$sam_tmp" "$bam_tmp" "$sorted_tmp"
 }
 
 step_metadata() {
