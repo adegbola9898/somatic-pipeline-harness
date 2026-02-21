@@ -664,6 +664,150 @@ step_align() {
   require_file "$qc_flagstat"
 }
 
+step_qc_gate() {
+  require_cmd samtools
+  require_cmd bedtools
+
+  local bam="${RESULTS_DIR}/bam/${SAMPLE_ID}.sorted.markdup.bam"
+  local bai="${bam}.bai"
+  require_file "$bam"
+  require_file "$bai"
+  samtools quickcheck -v "$bam" >/dev/null 2>&1 || die "samtools quickcheck failed: $bam"
+
+  local bed="$TARGETS_BED"
+  require_file "$bed"
+
+  mkdir -p "$QC_DIR"
+
+  local out_overall="${QC_DIR}/coverage_summary.tsv"
+  local out_gene="${QC_DIR}/per_gene_coverage.tsv"
+  local out_gate="${QC_DIR}/qc_gate.tsv"
+
+  # thresholds to report (not the pass/fail thresholds)
+  local thr_list="${QC_THRESHOLDS:-1,10,50,100,200,500}"
+
+  # Idempotent skip
+  if [[ -s "$out_overall" && -s "$out_gene" && -s "$out_gate" ]]; then
+    log "SKIP step_qc_gate (outputs present)"
+    return
+  fi
+
+  log "RUN step_qc_gate"
+  rm -f "$out_overall" "$out_gene" "$out_gate"
+
+  # ---------------------------
+  # Overall coverage on targets
+  # ---------------------------
+  run_to_file "coverage summary (targets)" "$out_overall" bash -c "
+    set -euo pipefail
+    samtools depth -aa -b '$bed' '$bam' \
+    | awk -v thr='$thr_list' '
+      BEGIN{
+        n=split(thr,t,\",\");
+        for(i=1;i<=n;i++) c[i]=0;
+        total=0; sum=0;
+      }
+      {
+        d=\$3;
+        total++;
+        sum+=d;
+        for(i=1;i<=n;i++) if(d>=t[i]) c[i]++;
+      }
+      END{
+        if(total==0){ print \"ERROR\\tno_positions\"; exit 2 }
+        print \"metric\\tvalue\";
+        printf(\"target_bases\\t%d\\n\", total);
+        printf(\"mean_depth\\t%.2f\\n\", sum/total);
+        for(i=1;i<=n;i++){
+          printf(\"pct_ge_%sx\\t%.3f\\n\", t[i], (100.0*c[i]/total));
+        }
+      }'
+  "
+  require_file "$out_overall"
+
+  # ---------------------------
+  # Per-gene coverage (bedtools)
+  # ---------------------------
+  local tmp_depth="${WORK_DIR}/qc.depth.${SAMPLE_ID}.bedgraph"
+  rm -f "$tmp_depth"
+
+  run_cmd "depth bedgraph (targets)" bash -c "
+    set -euo pipefail
+    samtools depth -aa -b '$bed' '$bam' \
+      | awk 'BEGIN{OFS=\"\\t\"}{print \$1, \$2-1, \$2, \$3}' > '$tmp_depth'
+  "
+  require_file "$tmp_depth"
+
+  run_cmd "per-gene coverage (bedtools)" bash -c "
+    set -euo pipefail
+    bedtools intersect -a '$tmp_depth' -b '$bed' -wa -wb \
+      | awk -v thr='$thr_list' '
+        BEGIN{ OFS=\"\\t\"; n=split(thr,T,\",\"); }
+        {
+          d=\$4;
+          gene=\$8;   # B col4 -> field 8 with -wa -wb
+          bases[gene]++; sum[gene]+=d;
+          for(i=1;i<=n;i++) if(d>=T[i]) ge[gene,i]++;
+        }
+        END{
+          print \"gene\",\"target_bases\",\"mean_depth\",\"pct_ge_1x\",\"pct_ge_10x\",\"pct_ge_50x\",\"pct_ge_100x\",\"pct_ge_200x\",\"pct_ge_500x\";
+          for(g in bases){
+            b=bases[g];
+            mean=(b?sum[g]/b:0);
+            p1=(b?100*ge[g,1]/b:0);
+            p10=(b?100*ge[g,2]/b:0);
+            p50=(b?100*ge[g,3]/b:0);
+            p100=(b?100*ge[g,4]/b:0);
+            p200=(b?100*ge[g,5]/b:0);
+            p500=(b?100*ge[g,6]/b:0);
+            printf \"%s\\t%d\\t%.2f\\t%.3f\\t%.3f\\t%.3f\\t%.3f\\t%.3f\\t%.3f\\n\", g,b,mean,p1,p10,p50,p100,p200,p500;
+          }
+        }' \
+      | sort -k3,3nr > '$out_gene'
+  "
+  require_file "$out_gene"
+
+  # ---------------------------
+  # Gate decision (hardcoded low defaults; env override allowed)
+  # ---------------------------
+  local mean_depth pct100
+  mean_depth="$(awk -F'\t' '$1=="mean_depth"{print $2}' "$out_overall" | head -n1)"
+  pct100="$(awk -F'\t' '$1=="pct_ge_100x"{print $2}' "$out_overall" | head -n1)"
+  [[ -n "$mean_depth" && -n "$pct100" ]] || die "failed to parse $out_overall"
+
+  # Hardcoded low thresholds (baseline-safe). Override later via env if desired.
+  local min_mean="${QC_MIN_MEAN_COV:-30}"
+  local min_pct100="${QC_MIN_PCT_AT_100X:-10}"
+
+  local status="PASS"
+  local reason="meets_thresholds"
+
+  awk -v v="$mean_depth" -v m="$min_mean" 'BEGIN{exit (v+0 >= m+0)?0:1}' \
+    || { status="FAIL"; reason="mean_depth_below_min"; }
+
+  if [[ "$status" == "PASS" ]]; then
+    awk -v v="$pct100" -v m="$min_pct100" 'BEGIN{exit (v+0 >= m+0)?0:1}' \
+      || { status="FAIL"; reason="pct_ge_100x_below_min"; }
+  fi
+
+  write_atomic "$out_gate" <<EOF
+check	status	note
+qc_gate	${status}	${reason}
+min_mean_depth	INFO	${min_mean}
+min_pct_ge_100x	INFO	${min_pct100}
+mean_depth	INFO	${mean_depth}
+pct_ge_100x	INFO	${pct100}
+EOF
+  require_file "$out_gate"
+
+  # Enforce only if user requested AND status FAIL
+  if [[ "${ENFORCE_QC_GATE:-false}" != "false" && "${ENFORCE_QC_GATE:-0}" != "0" ]]; then
+    if [[ "$status" == "FAIL" ]]; then
+      die "QC gate failed (${reason}); stopping before Mutect2 (set --enforce-qc-gate 0 to continue)"
+    fi
+  fi
+}
+
 step_metadata() {
   local meta="${META_DIR}/run_metadata.json"
 
@@ -715,6 +859,7 @@ step_resources
 step_ingest
 step_fastp
 step_align
+step_qc_gate
 log "TODO: step_mutect_call/filter"
 log "TODO: step_qc"
 step_metadata
