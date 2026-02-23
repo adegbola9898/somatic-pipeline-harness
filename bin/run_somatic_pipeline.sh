@@ -808,6 +808,125 @@ EOF
   fi
 }
 
+
+step_mutect_call() {
+  require_cmd gatk
+  require_cmd bcftools
+
+  local manifest="${META_DIR}/bundle_manifest_used.json"
+  require_file "$manifest"
+
+  local ref_fasta
+  ref_fasta="$(json_get_simple "ref_fasta" "$manifest")"
+  [[ -n "$ref_fasta" ]] || die "manifest missing ref_fasta: $manifest"
+  require_file "$ref_fasta"
+
+  local bam="${RESULTS_DIR}/bam/${SAMPLE_ID}.sorted.markdup.bam"
+  local bai="${bam}.bai"
+  require_file "$bam"
+  require_file "$bai"
+  samtools quickcheck -v "$bam" >/dev/null 2>&1 || die "samtools quickcheck failed: $bam"
+
+  local out_dir="${RESULTS_DIR}/mutect2"
+  mkdir -p "$out_dir"
+
+  local vcf_raw="${out_dir}/${SAMPLE_ID}.mutect2.unfiltered.vcf.gz"
+  local vcf_raw_tbi="${vcf_raw}.tbi"
+  local stats_out="${out_dir}/${SAMPLE_ID}.mutect2.stats"
+
+  # Idempotent skip
+  if [[ -s "$vcf_raw" && -s "$vcf_raw_tbi" && -s "$stats_out" ]]; then
+    log "SKIP step_mutect_call (outputs present)"
+    return
+  fi
+
+  log "RUN step_mutect_call"
+  rm -f "$vcf_raw" "$vcf_raw_tbi" "$stats_out"
+
+  # Run v2-equivalent Mutect2 (tumor-only targeted)
+  run_cmd "gatk Mutect2" gatk Mutect2 \
+    -R "$ref_fasta" \
+    -I "$bam" \
+    -L "$TARGETS_BED" \
+    --max-reads-per-alignment-start 0 \
+    --native-pair-hmm-threads "$THREADS" \
+    -O "$vcf_raw"
+
+  require_file "$vcf_raw"
+
+  # Index raw VCF for downstream
+  run_cmd "bcftools index (raw)" bcftools index -t -f "$vcf_raw"
+  require_file "$vcf_raw_tbi"
+
+  # Capture stats file deterministically
+  # Different GATK builds place stats in slightly different default locations.
+  local cand=""
+  for c in "${vcf_raw}.stats" "${vcf_raw%.vcf.gz}.stats" "${out_dir}/${SAMPLE_ID}.mutect2.unfiltered.stats"; do
+    if [[ -s "$c" ]]; then cand="$c"; break; fi
+  done
+
+  # If none found, look for a stats file produced alongside the raw VCF
+  if [[ -z "$cand" ]]; then
+    cand="$(ls -1 "${out_dir}"/*.stats 2>/dev/null | head -n1 || true)"
+  fi
+
+  [[ -n "$cand" && -s "$cand" ]] || die "Mutect2 stats not found after call (expected a *.stats near $vcf_raw)."
+
+  # Normalize to our canonical stats filename
+  cp -f "$cand" "$stats_out"
+  require_file "$stats_out"
+}
+
+step_mutect_filter() {
+  require_cmd gatk
+  require_cmd bcftools
+
+  local manifest="${META_DIR}/bundle_manifest_used.json"
+  require_file "$manifest"
+
+  local ref_fasta
+  ref_fasta="$(json_get_simple "ref_fasta" "$manifest")"
+  [[ -n "$ref_fasta" ]] || die "manifest missing ref_fasta: $manifest"
+  require_file "$ref_fasta"
+
+  local out_dir="${RESULTS_DIR}/mutect2"
+  mkdir -p "$out_dir"
+
+  local vcf_raw="${out_dir}/${SAMPLE_ID}.mutect2.unfiltered.vcf.gz"
+  local vcf_raw_tbi="${vcf_raw}.tbi"
+  local stats_out="${out_dir}/${SAMPLE_ID}.mutect2.stats"
+
+  require_file "$vcf_raw"
+  require_file "$vcf_raw_tbi"
+  require_file "$stats_out"
+
+  local vcf_filt="${out_dir}/${SAMPLE_ID}.mutect2.filtered.vcf.gz"
+  local vcf_filt_tbi="${vcf_filt}.tbi"
+
+  # Idempotent skip
+  if [[ -s "$vcf_filt" && -s "$vcf_filt_tbi" ]]; then
+    log "SKIP step_mutect_filter (outputs present)"
+    return
+  fi
+
+  log "RUN step_mutect_filter"
+  rm -f "$vcf_filt" "$vcf_filt_tbi"
+
+  # v2-equivalent FilterMutectCalls
+  # (v2 did not pass --stats; many builds auto-detect via VCF basename.
+  # We still persist stats_out for provenance and future explicit wiring.)
+  run_cmd "gatk FilterMutectCalls" gatk FilterMutectCalls \
+    -R "$ref_fasta" \
+    -V "$vcf_raw" \
+    -O "$vcf_filt"
+
+  require_file "$vcf_filt"
+
+  run_cmd "bcftools index (filtered)" bcftools index -t -f "$vcf_filt"
+  require_file "$vcf_filt_tbi"
+}
+
+
 step_metadata() {
   local meta="${META_DIR}/run_metadata.json"
 
@@ -860,6 +979,8 @@ step_ingest
 step_fastp
 step_align
 step_qc_gate
+step_mutect_call
+step_mutect_filter
 log "TODO: step_mutect_call/filter"
 log "TODO: step_qc"
 step_metadata
