@@ -926,6 +926,133 @@ step_mutect_filter() {
   require_file "$vcf_filt_tbi"
 }
 
+step_postprocess_pass() {
+  require_cmd bcftools
+  require_cmd gzip
+  require_cmd awk
+  require_cmd wc
+
+  local manifest="${META_DIR}/bundle_manifest_used.json"
+  require_file "$manifest"
+
+  local ref_fasta
+  ref_fasta="$(json_get_simple "ref_fasta" "$manifest")"
+  [[ -n "$ref_fasta" ]] || die "manifest missing ref_fasta: $manifest"
+  require_file "$ref_fasta"
+  require_file "${ref_fasta}.fai"
+
+  local out_dir="${RESULTS_DIR}/mutect2"
+  mkdir -p "$out_dir"
+
+  # Input: filtered VCF from step_mutect_filter
+  local vcf_filtered="${out_dir}/${SAMPLE_ID}.mutect2.filtered.vcf.gz"
+  local vcf_filtered_tbi="${vcf_filtered}.tbi"
+  require_file "$vcf_filtered"
+  require_file "$vcf_filtered_tbi"
+
+  # Outputs (ported from v2 naming)
+  local pass_count_txt="${out_dir}/${SAMPLE_ID}.PASS_count.txt"
+  local pass_tsv="${out_dir}/${SAMPLE_ID}.PASS_variants.tsv"
+  local vcf_split="${out_dir}/${SAMPLE_ID}.PASS.norm.split.vcf.gz"
+  local vcf_split_tbi="${vcf_split}.tbi"
+  local vcf_split_csi="${vcf_split}.csi"
+  local perallele_tsv="${out_dir}/${SAMPLE_ID}.PASS_variants.perAllele.tsv"
+
+  # Idempotent skip: only if ALL expected outputs exist and non-empty
+  # Note: bcftools index may emit .tbi OR .csi depending on contigs/length; accept either.
+  if [[ -s "$pass_count_txt" && -s "$pass_tsv" && -s "$vcf_split" && ( -s "$vcf_split_tbi" || -s "$vcf_split_csi" ) && -s "$perallele_tsv" ]]; then
+    log "SKIP step_postprocess_pass (outputs present)"
+    return 0
+  fi
+
+  # Strict partial-output refusal (matches harness “fail-fast, don’t clobber” style)
+  if [[ -e "$pass_count_txt" || -e "$pass_tsv" || -e "$vcf_split" || -e "$vcf_split_tbi" || -e "$vcf_split_csi" || -e "$perallele_tsv" ]]; then
+    die "partial postprocess outputs exist; refusing overwrite. Delete:
+  $pass_count_txt
+  $pass_tsv
+  $vcf_split
+  $vcf_split_tbi
+  $vcf_split_csi
+  $perallele_tsv
+to re-run"
+  fi
+
+  log "RUN step_postprocess_pass"
+
+  # ---------------------------
+  # PASS count
+  # ---------------------------
+  run_to_file "PASS count" "$pass_count_txt" bash -c "
+    set -euo pipefail
+    bcftools view -H -f PASS '$vcf_filtered' \
+      | wc -l \
+      | awk '{print \"PASS_variants\\t\" \$1}'
+  "
+  require_file "$pass_count_txt"
+
+  # ---------------------------
+  # PASS TSV (basic columns)
+  # ---------------------------
+  run_to_file "PASS TSV (basic)" "$pass_tsv" bash -c "
+    set -euo pipefail
+    gzip -dc '$vcf_filtered' \
+    | awk 'BEGIN{FS=OFS=\"\\t\"; print \"CHROM\",\"POS\",\"ID\",\"REF\",\"ALT\",\"QUAL\",\"AF\",\"DP\"}
+           /^#/ {next}
+           \$7==\"PASS\" {
+             split(\$9,F,\":\"); split(\$10,V,\":\");
+             af=dp=\".\";
+             for(i=1;i<=length(F);i++){
+               if(F[i]==\"AF\") af=V[i];
+               if(F[i]==\"DP\") dp=V[i];
+             }
+             print \$1,\$2,\$3,\$4,\$5,\$6,af,dp
+           }'
+  "
+  require_file "$pass_tsv"
+
+  # ---------------------------
+  # PASS-only normalized + split VCF
+  # ---------------------------
+  run_cmd "PASS VCF split+norm" bash -c "
+    set -euo pipefail
+    bcftools view -f PASS '$vcf_filtered' \
+      | bcftools norm -f '$ref_fasta' -m -both -Oz -o '$vcf_split'
+    bcftools index -f '$vcf_split'
+  "
+  require_file "$vcf_split"
+  if [[ -s "$vcf_split_tbi" ]]; then
+    : # ok
+  elif [[ -s "$vcf_split_csi" ]]; then
+    : # ok
+  else
+    die "Missing index for split VCF (expected .tbi or .csi): $vcf_split"
+  fi
+
+  # ---------------------------
+  # Per-allele TSV from split VCF
+  # ---------------------------
+  run_to_file "PASS per-allele TSV" "$perallele_tsv" bash -c "
+    set -euo pipefail
+    gzip -dc '$vcf_split' \
+    | awk 'BEGIN{FS=OFS=\"\\t\"; print \"CHROM\",\"POS\",\"ID\",\"REF\",\"ALT\",\"QUAL\",\"DP\",\"AD_REF\",\"AD_ALT\",\"AF\",\"TLOD\"}
+           /^#/ {next}
+           {
+             split(\$9,F,\":\"); split(\$10,V,\":\");
+             dp=ad=af=tlod=\".\";
+             for(i=1;i<=length(F);i++){
+               if(F[i]==\"DP\") dp=V[i];
+               if(F[i]==\"AD\") ad=V[i];
+               if(F[i]==\"AF\") af=V[i];
+               if(F[i]==\"TLOD\") tlod=V[i];
+             }
+             split(ad,a,\",\");
+             ad_ref=a[1]; ad_alt=a[2];
+             print \$1,\$2,\$3,\$4,\$5,\$6,dp,ad_ref,ad_alt,af,tlod
+           }'
+  "
+  require_file "$perallele_tsv"
+}
+
 
 step_metadata() {
   local meta="${META_DIR}/run_metadata.json"
@@ -981,6 +1108,7 @@ step_align
 step_qc_gate
 step_mutect_call
 step_mutect_filter
+step_postprocess_pass
 log "TODO: step_mutect_call/filter"
 log "TODO: step_qc"
 step_metadata
