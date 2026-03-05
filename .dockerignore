@@ -1,0 +1,15 @@
+.git
+out
+data
+refs
+*.bam
+*.bai
+*.vcf
+*.vcf.gz
+*.tbi
+*.csi
+*.fastq
+*.fastq.gz
+*.fq
+*.fq.gz
+__pycache__

@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Cloud Run + gcsfuse: avoid ownership/permission metadata ops
+exec /usr/bin/tar --no-same-owner --no-same-permissions "$@"

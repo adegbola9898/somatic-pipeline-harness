@@ -1,0 +1,27 @@
+
+# Editor/OS junk
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Python caches
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Env dirs (if any)
+.venv/
+venv/
+.env
+
+# Outputs (common pipeline dirs)
+work/
+outputs/
+results/
+logs/
+tmp/
+temp/
+data/

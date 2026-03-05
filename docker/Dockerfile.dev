@@ -1,0 +1,16 @@
+FROM mambaorg/micromamba:1.5.10
+
+# Speed + reproducibility-ish: build env from repo spec
+COPY env/environment.yml /tmp/environment.yml
+
+# Create env in the micromamba root prefix (writable in this base image)
+RUN micromamba create -y -p "${MAMBA_ROOT_PREFIX}/envs/genomics" -f /tmp/environment.yml && \
+    micromamba clean -a -y
+
+# Put env tools on PATH for non-interactive execution
+ENV PATH="${MAMBA_ROOT_PREFIX}/envs/genomics/bin:${PATH}"
+
+RUN echo 'export PATH="${MAMBA_ROOT_PREFIX}/envs/genomics/bin:${PATH}"' >> "${HOME}/.bashrc" && \
+    echo 'export PATH="${MAMBA_ROOT_PREFIX}/envs/genomics/bin:${PATH}"' >> "${HOME}/.bash_profile"
+
+WORKDIR /work

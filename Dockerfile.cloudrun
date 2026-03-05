@@ -1,0 +1,9 @@
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+WORKDIR /work
+COPY . /work
+
+ENV PATH="/work/cloudrun_bin:${PATH}"
+
+ENTRYPOINT ["/work/bin/run_somatic_pipeline.sh"]
