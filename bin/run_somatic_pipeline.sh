@@ -648,6 +648,7 @@ step_align() {
       RG="$(printf "%b" "@RG\tID:${SID}\tSM:${SID}\tPL:ILLUMINA")"
 
       bwa-mem2 mem -t "$THREADS" -R "$RG" "$REF" "$R1" "$R2" \
+      | awk '"'"'BEGIN{OFS="\t"} /^@SQ/ {hasLN=0; for(i=1;i<=NF;i++) if($i ~ /^LN:/) hasLN=1; if(!hasLN) next} {print}'"'"' \
       | samtools view -@ "$THREADS" -b - \
       | samtools sort -@ "$THREADS" -n -T "${TMPPFX}.ns" - \
       | samtools fixmate -m - - \
