@@ -1142,6 +1142,8 @@ step_make_compact_pass_table() {
   require_cmd gzip
   require_cmd awk
   require_cmd wc
+  require_cmd bedtools
+  require_cmd sort
 
   local out_dir="${RESULTS_DIR}/mutect2"
   local reports_dir="${RESULTS_DIR}/reports"
@@ -1160,7 +1162,11 @@ step_make_compact_pass_table() {
     die "Missing index for split VCF (expected .tbi or .csi): $vcf_split"
   fi
 
+  require_file "$TARGETS_BED"
+
   local compact_tsv="${reports_dir}/${SAMPLE_ID}.PASS.compact.tsv"
+  local compact_bed_tmp="${WORK_DIR}/${SAMPLE_ID}.PASS.compact.tmp.bed"
+  local compact_joined_tmp="${WORK_DIR}/${SAMPLE_ID}.PASS.compact.joined.tmp.tsv"
 
   # Idempotent skip
   if [[ -s "$compact_tsv" ]]; then
@@ -1169,40 +1175,685 @@ step_make_compact_pass_table() {
   fi
 
   # Strict partial-output refusal
-  if [[ -e "$compact_tsv" ]]; then
+  if [[ -e "$compact_tsv" || -e "$compact_bed_tmp" || -e "$compact_joined_tmp" ]]; then
     die "partial compact report outputs exist; refusing overwrite. Delete:
   $compact_tsv
+  $compact_bed_tmp
+  $compact_joined_tmp
 to re-run"
   fi
 
   log "RUN step_make_compact_pass_table"
 
-  run_to_file "PASS compact table" "$compact_tsv" bash -c "
+  # Step 1: make a BED-like intermediate from PASS split VCF
+  run_to_file "PASS compact intermediate BED" "$compact_bed_tmp" bash -c "
     set -euo pipefail
     gzip -dc '$vcf_split' \
-    | awk 'BEGIN{FS=OFS=\"\t\"; print \"sample\",\"CHROM\",\"POS\",\"REF\",\"ALT\",\"DP\",\"AD_REF\",\"AD_ALT\",\"AF\",\"TLOD\"}
+    | awk 'BEGIN{FS=OFS=\"\t\"}
            /^#/ {next}
            {
              split(\$9,F,\":\"); split(\$10,V,\":\");
-             dp=ad=af=tlod=\".\";
+             dp=ad=af=\".\";
              for(i=1;i<=length(F);i++){
                if(F[i]==\"DP\") dp=V[i];
                if(F[i]==\"AD\") ad=V[i];
                if(F[i]==\"AF\") af=V[i];
-               if(F[i]==\"TLOD\") tlod=V[i];
              }
+
+             ad_ref=\".\"; ad_alt=\".\";
              split(ad,a,\",\");
-             ad_ref=(a[1] != \"\" ? a[1] : \".\");
-             ad_alt=(a[2] != \"\" ? a[2] : \".\");
-             print \"${SAMPLE_ID}\",\$1,\$2,\$4,\$5,dp,ad_ref,ad_alt,af,tlod
+             if(a[1] != \"\") ad_ref=a[1];
+             if(a[2] != \"\") ad_alt=a[2];
+
+             tlod=\".\"; roq=\".\"; germq=\".\"; popaf=\".\";
+             n=split(\$8,info,\";\");
+             for(i=1;i<=n;i++){
+               if(info[i] ~ /^TLOD=/){ split(info[i],x,\"=\"); tlod=x[2]; }
+               else if(info[i] ~ /^ROQ=/){ split(info[i],x,\"=\"); roq=x[2]; }
+               else if(info[i] ~ /^GERMQ=/){ split(info[i],x,\"=\"); germq=x[2]; }
+               else if(info[i] ~ /^POPAF=/){ split(info[i],x,\"=\"); popaf=x[2]; }
+             }
+
+             # BED-like:
+             # 1 chrom
+             # 2 start (0-based)
+             # 3 end   (1-based POS as half-open end)
+             # 4 sample
+             # 5 ref
+             # 6 alt
+             # 7 dp
+             # 8 ad_ref
+             # 9 ad_alt
+             # 10 af
+             # 11 tlod
+             # 12 roq
+             # 13 germq
+             # 14 popaf
+             print \$1,\$2-1,\$2,\"${SAMPLE_ID}\",\$4,\$5,dp,ad_ref,ad_alt,af,tlod,roq,germq,popaf
            }'
   "
 
+  require_file "$compact_bed_tmp"
+
+  # Step 2: intersect with gene-labelled BED and build final TSV
+  run_to_file "PASS compact table" "$compact_joined_tmp" bash -c "
+    set -euo pipefail
+    bedtools intersect -a '$compact_bed_tmp' -b '$TARGETS_BED' -wa -wb \
+    | awk 'BEGIN{FS=OFS=\"\t\"; print \"sample\",\"GENE\",\"CHROM\",\"POS\",\"REF\",\"ALT\",\"DP\",\"AD_REF\",\"AD_ALT\",\"AF\",\"TLOD\",\"ROQ\",\"GERMQ\",\"POPAF\"}
+           {
+             # from -a:
+             sample=\$4
+             chrom=\$1
+             pos=\$3
+             ref=\$5
+             alt=\$6
+             dp=\$7
+             ad_ref=\$8
+             ad_alt=\$9
+             af=\$10
+             tlod=\$11
+             roq=\$12
+             germq=\$13
+             popaf=\$14
+
+             # from -b: gene label is BED col4 => field 18
+             gene=\$18
+
+             print sample,gene,chrom,pos,ref,alt,dp,ad_ref,ad_alt,af,tlod,roq,germq,popaf
+           }'
+  "
+
+  require_file "$compact_joined_tmp"
+
+  # Move final output into place atomically
+  mv -f "$compact_joined_tmp" "$compact_tsv"
   require_file "$compact_tsv"
+
+  # Clean intermediate
+  rm -f "$compact_bed_tmp" || true
 
   local n_rows
   n_rows="$(awk 'NR>1{c++} END{print c+0}' "$compact_tsv")"
   log "step_make_compact_pass_table rows=$n_rows"
+}
+
+step_annotate_pass_table() {
+  require_cmd python3
+  require_cmd wc
+
+  local reports_dir="${RESULTS_DIR}/reports"
+  mkdir -p "$reports_dir"
+
+  local compact_tsv="${reports_dir}/${SAMPLE_ID}.PASS.compact.tsv"
+  require_file "$compact_tsv"
+
+  local annotated_jsonl="${reports_dir}/${SAMPLE_ID}.PASS.annotated.jsonl"
+  local annotated_tsv="${reports_dir}/${SAMPLE_ID}.PASS.annotated.tsv"
+
+  # Idempotent skip
+  if [[ -s "$annotated_jsonl" && -s "$annotated_tsv" ]]; then
+    log "SKIP step_annotate_pass_table (outputs present)"
+    return 0
+  fi
+
+  # Strict partial-output refusal
+  if [[ -e "$annotated_jsonl" || -e "$annotated_tsv" ]]; then
+    die "partial annotate outputs exist; refusing overwrite. Delete:
+  $annotated_jsonl
+  $annotated_tsv
+to re-run"
+  fi
+
+  log "RUN step_annotate_pass_table"
+
+  python3 - "$compact_tsv" "$annotated_jsonl" "$annotated_tsv" <<'PY'
+import csv
+import json
+import os
+import sys
+import time
+from pathlib import Path
+
+compact_tsv = Path(sys.argv[1])
+out_jsonl = Path(sys.argv[2])
+out_tsv = Path(sys.argv[3])
+
+try:
+    import requests
+except Exception as e:
+    raise RuntimeError("Python package 'requests' is required but not available in this runtime.") from e
+
+if not compact_tsv.exists():
+    raise FileNotFoundError(f"Missing compact TSV: {compact_tsv}")
+
+rows = []
+with compact_tsv.open() as f:
+    r = csv.DictReader(f, delimiter="\t")
+    required = ["CHROM", "POS", "REF", "ALT"]
+    missing = [c for c in required if c not in (r.fieldnames or [])]
+    if missing:
+        raise ValueError(f"Compact TSV missing required columns: {missing}. Header was: {r.fieldnames}")
+    for row in r:
+        if not row:
+            continue
+        rows.append(row)
+
+# Build per-ALT HGVS
+expanded = []
+for row in rows:
+    chrom = row["CHROM"]
+    pos = row["POS"]
+    ref = row["REF"]
+    alt = row["ALT"]
+    alts = alt.split(",")
+    for a in alts:
+        hgvs = f"{chrom}:g.{pos}{ref}>{a}"
+        expanded.append((hgvs, row, a))
+
+VEP_URL = "https://rest.ensembl.org/vep/homo_sapiens/hgvs"
+HEADERS = {"Content-Type": "application/json", "Accept": "application/json"}
+CHUNK = 50
+SLEEP_SEC = 0.2
+
+def pick_from_transcript_consequences(tc_list):
+    if not tc_list:
+        return None
+    for tc in tc_list:
+        if tc.get("canonical") == 1 or tc.get("canonical") is True:
+            return tc
+    return tc_list[0]
+
+results_by_hgvs = {}
+
+out_jsonl.parent.mkdir(parents=True, exist_ok=True)
+if out_jsonl.exists():
+    out_jsonl.unlink()
+
+n = len(expanded)
+for start in range(0, n, CHUNK):
+    batch = expanded[start:start+CHUNK]
+    hgvs_list = [h for (h, _, _) in batch]
+
+    payload = {"hgvs_notations": hgvs_list}
+    r = requests.post(VEP_URL, headers=HEADERS, data=json.dumps(payload), timeout=120)
+    if r.status_code != 200:
+        raise RuntimeError(f"VEP request failed (HTTP {r.status_code}): {r.text[:500]}")
+
+    data = r.json()
+    if not isinstance(data, list):
+        raise RuntimeError(f"Unexpected VEP response type: {type(data)}")
+
+    with out_jsonl.open("a") as out:
+        for item in data:
+            out.write(json.dumps(item) + "\n")
+
+            hgvs = item.get("input")
+            if "error" in item:
+                results_by_hgvs[hgvs] = {
+                    "vep_error": item.get("error", ""),
+                    "most_severe_consequence": "",
+                    "gene_symbol": "",
+                    "gene_id": "",
+                    "transcript_id": "",
+                    "hgvsc": "",
+                    "hgvsp": "",
+                    "protein_id": "",
+                    "impact": "",
+                    "sift": "",
+                    "polyphen": "",
+                    "clin_sig": "",
+                    "existing_variation": "",
+                    "gnomad_af": "",
+                    "gnomad_popmax_af": "",
+                }
+                continue
+
+            most = item.get("most_severe_consequence", "")
+            existing = ""
+            if isinstance(item.get("colocated_variants"), list) and item["colocated_variants"]:
+                for cv in item["colocated_variants"]:
+                    if cv.get("id"):
+                        existing = cv["id"]
+                        break
+
+            tc = pick_from_transcript_consequences(item.get("transcript_consequences", [])) or {}
+            gene_symbol = tc.get("gene_symbol", "") or tc.get("gene_symbol_source", "")
+            gene_id = tc.get("gene_id", "")
+            transcript_id = tc.get("transcript_id", "")
+            hgvsc = tc.get("hgvsc", "")
+            hgvsp = tc.get("hgvsp", "")
+            protein_id = tc.get("protein_id", "")
+            impact = tc.get("impact", "")
+
+            sift = ""
+            if tc.get("sift_prediction") is not None:
+                sift = f"{tc.get('sift_prediction')}({tc.get('sift_score','')})"
+
+            polyphen = ""
+            if tc.get("polyphen_prediction") is not None:
+                polyphen = f"{tc.get('polyphen_prediction')}({tc.get('polyphen_score','')})"
+
+            clin_sig = ""
+            if isinstance(item.get("colocated_variants"), list):
+                for cv in item["colocated_variants"]:
+                    cs = cv.get("clin_sig")
+                    if cs:
+                        clin_sig = ";".join(cs) if isinstance(cs, list) else str(cs)
+                        break
+
+            gnomad_af = ""
+            gnomad_popmax_af = ""
+            if isinstance(item.get("colocated_variants"), list):
+                for cv in item["colocated_variants"]:
+                    for k in ["gnomad_af", "gnomAD_AF", "gnomadg_af", "gnomad_genomes_af", "gnomade_af", "gnomad_exomes_af"]:
+                        if k in cv and cv[k] is not None:
+                            gnomad_af = str(cv[k])
+                            break
+                    for k in ["gnomad_popmax_af", "gnomAD_POPMAX_AF", "gnomad_popmax", "gnomad_genomes_popmax_af", "gnomad_exomes_popmax_af"]:
+                        if k in cv and cv[k] is not None:
+                            gnomad_popmax_af = str(cv[k])
+                            break
+                    if gnomad_af or gnomad_popmax_af:
+                        break
+
+            results_by_hgvs[hgvs] = {
+                "vep_error": "",
+                "most_severe_consequence": most,
+                "gene_symbol": gene_symbol,
+                "gene_id": gene_id,
+                "transcript_id": transcript_id,
+                "hgvsc": hgvsc,
+                "hgvsp": hgvsp,
+                "protein_id": protein_id,
+                "impact": impact,
+                "sift": sift,
+                "polyphen": polyphen,
+                "clin_sig": clin_sig,
+                "existing_variation": existing,
+                "gnomad_af": gnomad_af,
+                "gnomad_popmax_af": gnomad_popmax_af,
+            }
+
+    time.sleep(SLEEP_SEC)
+
+out_cols = list(rows[0].keys()) + [
+    "VEP_HGVS",
+    "VEP_most_severe_consequence",
+    "VEP_gene_symbol",
+    "VEP_gene_id",
+    "VEP_transcript_id",
+    "VEP_hgvsc",
+    "VEP_hgvsp",
+    "VEP_protein_id",
+    "VEP_impact",
+    "VEP_sift",
+    "VEP_polyphen",
+    "VEP_clin_sig",
+    "VEP_existing_variation",
+    "VEP_gnomad_af",
+    "VEP_gnomad_popmax_af",
+    "VEP_error",
+]
+
+with out_tsv.open("w", newline="") as out:
+    w = csv.writer(out, delimiter="\t")
+    w.writerow(out_cols)
+
+    for hgvs, row, alt_used in expanded:
+        ann = results_by_hgvs.get(hgvs, None)
+        if ann is None:
+            ann = {
+                "vep_error": "missing_response",
+                "most_severe_consequence": "",
+                "gene_symbol": "",
+                "gene_id": "",
+                "transcript_id": "",
+                "hgvsc": "",
+                "hgvsp": "",
+                "protein_id": "",
+                "impact": "",
+                "sift": "",
+                "polyphen": "",
+                "clin_sig": "",
+                "existing_variation": "",
+                "gnomad_af": "",
+                "gnomad_popmax_af": "",
+            }
+
+        w.writerow(list(row.values()) + [
+            hgvs,
+            ann["most_severe_consequence"],
+            ann["gene_symbol"],
+            ann["gene_id"],
+            ann["transcript_id"],
+            ann["hgvsc"],
+            ann["hgvsp"],
+            ann["protein_id"],
+            ann["impact"],
+            ann["sift"],
+            ann["polyphen"],
+            ann["clin_sig"],
+            ann["existing_variation"],
+            ann["gnomad_af"],
+            ann["gnomad_popmax_af"],
+            ann["vep_error"],
+        ])
+
+print(f"Wrote annotated JSONL: {out_jsonl}")
+print(f"Wrote annotated TSV: {out_tsv}")
+print(f"Annotated rows: {len(expanded)}")
+PY
+
+  require_file "$annotated_jsonl"
+  require_file "$annotated_tsv"
+
+  local n_rows
+  n_rows="$(awk 'NR>1{c++} END{print c+0}' "$annotated_tsv")"
+  log "step_annotate_pass_table rows=$n_rows"
+}
+
+step_flag_variant_likelihood() {
+  require_cmd python3
+  require_cmd wc
+
+  local reports_dir="${RESULTS_DIR}/reports"
+  mkdir -p "$reports_dir"
+
+  local annotated_tsv="${reports_dir}/${SAMPLE_ID}.PASS.annotated.tsv"
+  require_file "$annotated_tsv"
+
+  local flagged_tsv="${reports_dir}/${SAMPLE_ID}.PASS.flagged.tsv"
+  local somaticish_tsv="${reports_dir}/${SAMPLE_ID}.PASS.somaticish.tsv"
+  local germlineish_tsv="${reports_dir}/${SAMPLE_ID}.PASS.germlineish.tsv"
+
+  # Idempotent skip
+  if [[ -s "$flagged_tsv" && -s "$somaticish_tsv" && -s "$germlineish_tsv" ]]; then
+    log "SKIP step_flag_variant_likelihood (outputs present)"
+    return 0
+  fi
+
+  # Strict partial-output refusal
+  if [[ -e "$flagged_tsv" || -e "$somaticish_tsv" || -e "$germlineish_tsv" ]]; then
+    die "partial flagging outputs exist; refusing overwrite. Delete:
+  $flagged_tsv
+  $somaticish_tsv
+  $germlineish_tsv
+to re-run"
+  fi
+
+  log "RUN step_flag_variant_likelihood"
+
+  python3 - "$annotated_tsv" "$flagged_tsv" "$somaticish_tsv" "$germlineish_tsv" <<'PY'
+import csv
+import sys
+from pathlib import Path
+
+inp = Path(sys.argv[1])
+out_flagged = Path(sys.argv[2])
+out_som = Path(sys.argv[3])
+out_ger = Path(sys.argv[4])
+
+def parse_float(x):
+    try:
+        return float(x)
+    except Exception:
+        return None
+
+def parse_int(x):
+    try:
+        return int(x)
+    except Exception:
+        return None
+
+rows = []
+with inp.open() as f:
+    r = csv.DictReader(f, delimiter="\t")
+    for row in r:
+        af = parse_float(row.get("AF", ""))
+        dp = parse_int(row.get("DP", ""))
+        ad_ref = parse_int(row.get("AD_REF", ""))
+        ad_alt = parse_int(row.get("AD_ALT", ""))
+        tlod = parse_float(row.get("TLOD", ""))
+        roq = parse_float(row.get("ROQ", ""))
+        germq = parse_float(row.get("GERMQ", ""))
+        gnomad_af = parse_float(row.get("VEP_gnomad_af", ""))
+        clin_sig = (row.get("VEP_clin_sig", "") or "").lower()
+
+        somaticish = False
+        germlineish = False
+        reasons = []
+
+        if dp is not None and af is not None:
+            if dp >= 20 and af <= 0.35:
+                somaticish = True
+                reasons.append("low_af_depth_ok")
+
+            if dp >= 20 and af >= 0.90:
+                germlineish = True
+                reasons.append("very_high_af_depth_ok")
+
+        if ad_ref == 0 and ad_alt is not None and ad_alt >= 20:
+            germlineish = True
+            reasons.append("ad_ref_zero_homalt_like")
+
+        if gnomad_af is not None and gnomad_af >= 0.001:
+            germlineish = True
+            reasons.append("population_af_present")
+
+        if "benign" in clin_sig or "likely_benign" in clin_sig:
+            germlineish = True
+            reasons.append("clinvar_benign_like")
+
+        row["somaticish_flag"] = "1" if somaticish else "0"
+        row["germlineish_flag"] = "1" if germlineish else "0"
+        row["review_reasons"] = ";".join(reasons) if reasons else ""
+        rows.append(row)
+
+fieldnames = list(rows[0].keys()) if rows else []
+
+for path, keep_fn in [
+    (out_flagged, lambda x: True),
+    (out_som, lambda x: x["somaticish_flag"] == "1"),
+    (out_ger, lambda x: x["germlineish_flag"] == "1"),
+]:
+    with path.open("w", newline="") as f:
+        w = csv.DictWriter(f, delimiter="\t", fieldnames=fieldnames)
+        w.writeheader()
+        for row in rows:
+            if keep_fn(row):
+                w.writerow(row)
+
+print(f"Wrote flagged table: {out_flagged}")
+print(f"Wrote somaticish table: {out_som}")
+print(f"Wrote germlineish table: {out_ger}")
+print(f"Total rows: {len(rows)}")
+print(f"Somaticish rows: {sum(1 for r in rows if r['somaticish_flag']=='1')}")
+print(f"Germlineish rows: {sum(1 for r in rows if r['germlineish_flag']=='1')}")
+PY
+
+  require_file "$flagged_tsv"
+  require_file "$somaticish_tsv"
+  require_file "$germlineish_tsv"
+
+  local n_flagged n_som n_ger
+  n_flagged="$(awk 'NR>1{c++} END{print c+0}' "$flagged_tsv")"
+  n_som="$(awk 'NR>1{c++} END{print c+0}' "$somaticish_tsv")"
+  n_ger="$(awk 'NR>1{c++} END{print c+0}' "$germlineish_tsv")"
+  log "step_flag_variant_likelihood total=$n_flagged somaticish=$n_som germlineish=$n_ger"
+}
+
+step_gene_summary() {
+  require_cmd python3
+  require_cmd wc
+
+  local reports_dir="${RESULTS_DIR}/reports"
+  mkdir -p "$reports_dir"
+
+  local flagged_tsv="${reports_dir}/${SAMPLE_ID}.PASS.flagged.tsv"
+  local per_gene_cov="${QC_DIR}/per_gene_coverage.tsv"
+  local gene_summary_tsv="${reports_dir}/${SAMPLE_ID}.gene_summary.tsv"
+
+  require_file "$flagged_tsv"
+  require_file "$per_gene_cov"
+
+  # Idempotent skip
+  if [[ -s "$gene_summary_tsv" ]]; then
+    log "SKIP step_gene_summary (outputs present)"
+    return 0
+  fi
+
+  # Strict partial-output refusal
+  if [[ -e "$gene_summary_tsv" ]]; then
+    die "partial gene summary outputs exist; refusing overwrite. Delete:
+  $gene_summary_tsv
+to re-run"
+  fi
+
+  log "RUN step_gene_summary"
+
+  python3 - "$flagged_tsv" "$per_gene_cov" "$gene_summary_tsv" <<'PY'
+import csv
+import sys
+from pathlib import Path
+from statistics import mean
+
+flagged_tsv = Path(sys.argv[1])
+per_gene_cov = Path(sys.argv[2])
+out_tsv = Path(sys.argv[3])
+
+def parse_float(x):
+    try:
+        return float(x)
+    except Exception:
+        return None
+
+# -----------------------------
+# Read per-gene coverage table
+# -----------------------------
+coverage = {}
+with per_gene_cov.open() as f:
+    r = csv.DictReader(f, delimiter="\t")
+    for row in r:
+        gene = row.get("gene", "").strip()
+        if not gene:
+            continue
+        coverage[gene] = {
+            "mean_depth": row.get("mean_depth", "."),
+            "pct_ge_100x": row.get("pct_ge_100x", "."),
+            "target_bases": row.get("target_bases", "."),
+        }
+
+# -----------------------------
+# Read flagged variant table
+# -----------------------------
+genes = {}
+
+with flagged_tsv.open() as f:
+    r = csv.DictReader(f, delimiter="\t")
+    for row in r:
+        gene = (row.get("GENE", "") or "").strip()
+        if not gene:
+            gene = "NA"
+
+        af = parse_float(row.get("AF", ""))
+        tlod = parse_float(row.get("TLOD", ""))
+
+        somaticish = row.get("somaticish_flag", "0") == "1"
+        germlineish = row.get("germlineish_flag", "0") == "1"
+
+        if gene not in genes:
+            genes[gene] = {
+                "pass_variant_count": 0,
+                "somaticish_count": 0,
+                "germlineish_count": 0,
+                "afs": [],
+                "tlods": [],
+            }
+
+        genes[gene]["pass_variant_count"] += 1
+        if somaticish:
+            genes[gene]["somaticish_count"] += 1
+        if germlineish:
+            genes[gene]["germlineish_count"] += 1
+        if af is not None:
+            genes[gene]["afs"].append(af)
+        if tlod is not None:
+            genes[gene]["tlods"].append(tlod)
+
+# -----------------------------
+# Ensure genes from coverage also appear
+# -----------------------------
+for gene in coverage:
+    if gene not in genes:
+        genes[gene] = {
+            "pass_variant_count": 0,
+            "somaticish_count": 0,
+            "germlineish_count": 0,
+            "afs": [],
+            "tlods": [],
+        }
+
+# -----------------------------
+# Write summary
+# -----------------------------
+with out_tsv.open("w", newline="") as out:
+    w = csv.writer(out, delimiter="\t")
+    w.writerow([
+        "GENE",
+        "pass_variant_count",
+        "somaticish_count",
+        "germlineish_count",
+        "max_AF",
+        "mean_AF",
+        "max_TLOD",
+        "mean_depth",
+        "pct_ge_100x",
+        "target_bases",
+    ])
+
+    # Sort by somaticish_count desc, then pass_variant_count desc, then gene
+    for gene in sorted(
+        genes.keys(),
+        key=lambda g: (
+            -genes[g]["somaticish_count"],
+            -genes[g]["pass_variant_count"],
+            g
+        )
+    ):
+        afs = genes[gene]["afs"]
+        tlods = genes[gene]["tlods"]
+
+        max_af = f"{max(afs):.3f}" if afs else "."
+        mean_af = f"{mean(afs):.3f}" if afs else "."
+        max_tlod = f"{max(tlods):.2f}" if tlods else "."
+
+        cov = coverage.get(gene, {})
+        mean_depth = cov.get("mean_depth", ".")
+        pct_ge_100x = cov.get("pct_ge_100x", ".")
+        target_bases = cov.get("target_bases", ".")
+
+        w.writerow([
+            gene,
+            genes[gene]["pass_variant_count"],
+            genes[gene]["somaticish_count"],
+            genes[gene]["germlineish_count"],
+            max_af,
+            mean_af,
+            max_tlod,
+            mean_depth,
+            pct_ge_100x,
+            target_bases,
+        ])
+
+print(f"Wrote gene summary: {out_tsv}")
+print(f"Genes summarised: {len(genes)}")
+PY
+
+  require_file "$gene_summary_tsv"
+
+  local n_rows
+  n_rows="$(awk 'NR>1{c++} END{print c+0}' "$gene_summary_tsv")"
+  log "step_gene_summary rows=$n_rows"
 }
 
 
@@ -1263,7 +1914,10 @@ step_learn_read_orientation_model
 step_mutect_filter
 step_postprocess_pass
 step_make_compact_pass_table
-# log "TODO: step_qc"
+step_annotate_pass_table
+step_flag_variant_likelihood
+step_gene_summary
+
 step_metadata
 
 log "DONE (skeleton)."
