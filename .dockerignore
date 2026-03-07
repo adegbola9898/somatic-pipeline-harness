@@ -1,5 +1,7 @@
 .git
 out
+ref_cache
+refs/reference
 data
 refs
 *.bam

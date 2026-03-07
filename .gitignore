@@ -25,3 +25,12 @@ logs/
 tmp/
 temp/
 data/
+
+# Pipeline runtime outputs
+out/
+refs/
+ref_cache/
+
+# Reference bundles
+*.tar.gz
+*.tar

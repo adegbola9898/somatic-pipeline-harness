@@ -1729,18 +1729,46 @@ def parse_float(x):
 
 # -----------------------------
 # Read per-gene coverage table
+# Supports either:
+#   1) normal header on first row
+#   2) header accidentally sorted away / absent
 # -----------------------------
 coverage = {}
+
 with per_gene_cov.open() as f:
-    r = csv.DictReader(f, delimiter="\t")
+    lines = [ln.rstrip("\n") for ln in f if ln.strip()]
+
+if not lines:
+    raise RuntimeError(f"Empty per-gene coverage file: {per_gene_cov}")
+
+first_fields = lines[0].split("\t")
+has_header = first_fields[:3] == ["gene", "target_bases", "mean_depth"]
+
+if has_header:
+    r = csv.DictReader(lines, delimiter="\t")
     for row in r:
-        gene = row.get("gene", "").strip()
+        gene = (row.get("gene", "") or "").strip()
         if not gene:
             continue
         coverage[gene] = {
             "mean_depth": row.get("mean_depth", "."),
             "pct_ge_100x": row.get("pct_ge_100x", "."),
             "target_bases": row.get("target_bases", "."),
+        }
+else:
+    # Expected fixed column order from step_qc_gate output:
+    # gene target_bases mean_depth pct_ge_1x pct_ge_10x pct_ge_50x pct_ge_100x pct_ge_200x pct_ge_500x
+    for ln in lines:
+        parts = ln.split("\t")
+        if len(parts) < 7:
+            continue
+        gene = parts[0].strip()
+        if not gene or gene == "gene":
+            continue
+        coverage[gene] = {
+            "target_bases": parts[1],
+            "mean_depth": parts[2],
+            "pct_ge_100x": parts[6],
         }
 
 # -----------------------------
@@ -1811,7 +1839,6 @@ with out_tsv.open("w", newline="") as out:
         "target_bases",
     ])
 
-    # Sort by somaticish_count desc, then pass_variant_count desc, then gene
     for gene in sorted(
         genes.keys(),
         key=lambda g: (
@@ -1854,6 +1881,259 @@ PY
   local n_rows
   n_rows="$(awk 'NR>1{c++} END{print c+0}' "$gene_summary_tsv")"
   log "step_gene_summary rows=$n_rows"
+}
+
+step_make_html_report() {
+  require_cmd python3
+
+  local reports_dir="${RESULTS_DIR}/reports"
+  mkdir -p "$reports_dir"
+
+  local flagged_tsv="${reports_dir}/${SAMPLE_ID}.PASS.flagged.tsv"
+  local gene_summary_tsv="${reports_dir}/${SAMPLE_ID}.gene_summary.tsv"
+  local html_report="${reports_dir}/${SAMPLE_ID}.report.html"
+  local coverage_tsv="${QC_DIR}/coverage_summary.tsv"
+
+  require_file "$flagged_tsv"
+  require_file "$gene_summary_tsv"
+  require_file "$coverage_tsv"
+
+  local uncertain_tsv="${reports_dir}/${SAMPLE_ID}.PASS.uncertain.tsv"
+  local run_meta="${META_DIR}/run_metadata.json"
+
+  # Idempotent skip
+  if [[ -s "$html_report" ]]; then
+    log "SKIP step_make_html_report (outputs present)"
+    return 0
+  fi
+
+  # Strict partial-output refusal
+  if [[ -e "$html_report" ]]; then
+    die "partial html report outputs exist; refusing overwrite. Delete:
+  $html_report
+to re-run"
+  fi
+
+  log "RUN step_make_html_report"
+
+  python3 - "$flagged_tsv" "$gene_summary_tsv" "$coverage_tsv" "$html_report" "$run_meta" "$uncertain_tsv" "$SAMPLE_ID" "$PIPELINE_VERSION" "$SRA" <<'PY'
+import csv
+import html
+import json
+import sys
+from pathlib import Path
+
+flagged_tsv = Path(sys.argv[1])
+gene_summary_tsv = Path(sys.argv[2])
+coverage_tsv = Path(sys.argv[3])
+html_report = Path(sys.argv[4])
+run_meta = Path(sys.argv[5])
+uncertain_tsv = Path(sys.argv[6])
+sample_id = sys.argv[7]
+pipeline_version = sys.argv[8]
+sra_id = sys.argv[9]
+
+def read_tsv(path):
+    with path.open() as f:
+        return list(csv.DictReader(f, delimiter="\t"))
+
+def read_coverage(path):
+    metrics = {}
+    with path.open() as f:
+        for line in f:
+            line = line.rstrip("\n")
+            if not line.strip():
+                continue
+            parts = line.split("\t")
+            if len(parts) != 2:
+                continue
+            if parts[0] == "metric":
+                continue
+            metrics[parts[0]] = parts[1]
+    return metrics
+
+def html_table(rows, columns, max_rows=None):
+    if max_rows is not None:
+        rows = rows[:max_rows]
+
+    out = []
+    out.append('<table>')
+    out.append('<thead><tr>')
+    for c in columns:
+        out.append(f'<th>{html.escape(c)}</th>')
+    out.append('</tr></thead>')
+    out.append('<tbody>')
+
+    if not rows:
+        out.append(f'<tr><td colspan="{len(columns)}">No rows</td></tr>')
+    else:
+        for row in rows:
+            out.append('<tr>')
+            for c in columns:
+                val = row.get(c, "")
+                out.append(f'<td>{html.escape(str(val))}</td>')
+            out.append('</tr>')
+
+    out.append('</tbody></table>')
+    return "\n".join(out)
+
+flagged_rows = read_tsv(flagged_tsv)
+gene_rows = read_tsv(gene_summary_tsv)
+coverage = read_coverage(coverage_tsv)
+
+uncertain_count = 0
+if uncertain_tsv.exists():
+    uncertain_rows = read_tsv(uncertain_tsv)
+    uncertain_count = len(uncertain_rows)
+
+somaticish_count = sum(1 for r in flagged_rows if r.get("classification") == "somaticish")
+germlineish_count = sum(1 for r in flagged_rows if r.get("classification") == "germlineish")
+pass_count = len(flagged_rows)
+gene_count = len(gene_rows)
+
+top_gene_rows = gene_rows[:15]
+
+top_variant_rows = sorted(
+    flagged_rows,
+    key=lambda r: (
+        {"somaticish": 0, "uncertain": 1, "germlineish": 2}.get(r.get("classification", "uncertain"), 9),
+        -float(r.get("TLOD", "0") or 0),
+        -float(r.get("AF", "0") or 0),
+    )
+)[:25]
+
+meta_timestamp = ""
+if run_meta.exists():
+    try:
+        meta = json.loads(run_meta.read_text())
+        meta_timestamp = meta.get("timestamp", "")
+    except Exception:
+        meta_timestamp = ""
+
+css = """
+body {
+  font-family: Arial, sans-serif;
+  margin: 24px;
+  color: #222;
+  line-height: 1.4;
+}
+h1, h2 {
+  margin-bottom: 0.4rem;
+}
+.summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+  margin-bottom: 24px;
+}
+.card {
+  border: 1px solid #ddd;
+  border-radius: 10px;
+  padding: 12px;
+  background: #fafafa;
+}
+.card .label {
+  font-size: 0.9rem;
+  color: #666;
+}
+.card .value {
+  font-size: 1.3rem;
+  font-weight: bold;
+  margin-top: 4px;
+}
+table {
+  border-collapse: collapse;
+  width: 100%;
+  margin-bottom: 24px;
+  font-size: 0.95rem;
+}
+th, td {
+  border: 1px solid #ddd;
+  padding: 8px;
+  text-align: left;
+  vertical-align: top;
+}
+th {
+  background: #f0f0f0;
+}
+.muted {
+  color: #666;
+}
+.section {
+  margin-top: 28px;
+}
+"""
+
+html_parts = []
+html_parts.append("<!DOCTYPE html>")
+html_parts.append("<html><head><meta charset='utf-8'>")
+html_parts.append(f"<title>{html.escape(sample_id)} report</title>")
+html_parts.append(f"<style>{css}</style>")
+html_parts.append("</head><body>")
+
+html_parts.append(f"<h1>Somatic Pipeline Report: {html.escape(sample_id)}</h1>")
+html_parts.append("<p class='muted'>")
+html_parts.append(f"Pipeline version: {html.escape(pipeline_version)}")
+if sra_id:
+    html_parts.append(f" | SRA: {html.escape(sra_id)}")
+if meta_timestamp:
+    html_parts.append(f" | Run timestamp: {html.escape(meta_timestamp)}")
+html_parts.append("</p>")
+
+html_parts.append("<div class='summary-grid'>")
+for label, value in [
+    ("PASS variants", pass_count),
+    ("Somaticish variants", somaticish_count),
+    ("Germlineish variants", germlineish_count),
+    ("Uncertain variants", uncertain_count),
+    ("Genes summarised", gene_count),
+    ("Mean depth", coverage.get("mean_depth", ".")),
+    ("% >= 100x", coverage.get("pct_ge_100x", ".")),
+]:
+    html_parts.append("<div class='card'>")
+    html_parts.append(f"<div class='label'>{html.escape(str(label))}</div>")
+    html_parts.append(f"<div class='value'>{html.escape(str(value))}</div>")
+    html_parts.append("</div>")
+html_parts.append("</div>")
+
+html_parts.append("<div class='section'>")
+html_parts.append("<h2>Coverage Summary</h2>")
+coverage_rows = [
+    {"metric": "target_bases", "value": coverage.get("target_bases", ".")},
+    {"metric": "mean_depth", "value": coverage.get("mean_depth", ".")},
+    {"metric": "pct_ge_10x", "value": coverage.get("pct_ge_10x", ".")},
+    {"metric": "pct_ge_50x", "value": coverage.get("pct_ge_50x", ".")},
+    {"metric": "pct_ge_100x", "value": coverage.get("pct_ge_100x", ".")},
+    {"metric": "pct_ge_200x", "value": coverage.get("pct_ge_200x", ".")},
+]
+html_parts.append(html_table(coverage_rows, ["metric", "value"]))
+html_parts.append("</div>")
+
+html_parts.append("<div class='section'>")
+html_parts.append("<h2>Top Genes</h2>")
+html_parts.append(html_table(
+    top_gene_rows,
+    ["GENE", "pass_variant_count", "somaticish_count", "germlineish_count", "max_AF", "mean_AF", "max_TLOD", "mean_depth", "pct_ge_100x"],
+    max_rows=15
+))
+html_parts.append("</div>")
+
+html_parts.append("<div class='section'>")
+html_parts.append("<h2>Top Variants</h2>")
+html_parts.append(html_table(
+    top_variant_rows,
+    ["GENE", "CHROM", "POS", "REF", "ALT", "AF", "TLOD", "classification", "review_reasons", "VEP_most_severe_consequence", "VEP_gene_symbol", "VEP_clin_sig"],
+    max_rows=25
+))
+html_parts.append("</div>")
+
+html_parts.append("</body></html>")
+
+html_report.write_text("\n".join(html_parts), encoding="utf-8")
+print(f"Wrote HTML report: {html_report}")
+PY
+
+  require_file "$html_report"
 }
 
 
@@ -1917,6 +2197,7 @@ step_make_compact_pass_table
 step_annotate_pass_table
 step_flag_variant_likelihood
 step_gene_summary
+step_make_html_report
 
 step_metadata
 
