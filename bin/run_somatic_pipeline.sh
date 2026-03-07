@@ -177,6 +177,19 @@ stage_fastq_copy() {
   [[ "$dst_sha" == "$src_sha" ]] || die "checksum mismatch after copy for ${label}"
 }
 
+# ---- output verification helpers ----
+verify_vcf_gz() {
+  local f="$1"
+  require_file "$f"
+  bcftools view -h "$f" >/dev/null 2>&1 || die "invalid VCF.gz: $f"
+}
+
+verify_targz() {
+  local f="$1"
+  require_file "$f"
+  tar -tzf "$f" >/dev/null 2>&1 || die "invalid tar.gz: $f"
+}
+
 # ---- CLI (minimal; will expand next milestone item) ----
 SAMPLE_ID=""
 FASTQ1=""
@@ -813,6 +826,9 @@ EOF
 step_mutect_call() {
   require_cmd gatk
   require_cmd bcftools
+  require_cmd samtools
+  require_cmd tar
+  require_cmd wc
 
   local manifest="${META_DIR}/bundle_manifest_used.json"
   require_file "$manifest"
@@ -834,53 +850,106 @@ step_mutect_call() {
   local vcf_raw="${out_dir}/${SAMPLE_ID}.mutect2.unfiltered.vcf.gz"
   local vcf_raw_tbi="${vcf_raw}.tbi"
   local stats_out="${out_dir}/${SAMPLE_ID}.mutect2.stats"
+  local f1r2_tar="${out_dir}/${SAMPLE_ID}.mutect2.f1r2.tar.gz"
 
   # Idempotent skip
-  if [[ -s "$vcf_raw" && -s "$vcf_raw_tbi" && -s "$stats_out" ]]; then
+  if [[ -s "$vcf_raw" && -s "$vcf_raw_tbi" && -s "$stats_out" && -s "$f1r2_tar" ]]; then
     log "SKIP step_mutect_call (outputs present)"
-    return
+    return 0
+  fi
+
+  # Strict partial-output refusal
+  if [[ -e "$vcf_raw" || -e "$vcf_raw_tbi" || -e "$stats_out" || -e "$f1r2_tar" ]]; then
+    die "partial mutect_call outputs exist; refusing overwrite. Delete:
+  $vcf_raw
+  $vcf_raw_tbi
+  $stats_out
+  $f1r2_tar
+to re-run"
   fi
 
   log "RUN step_mutect_call"
-  rm -f "$vcf_raw" "$vcf_raw_tbi" "$stats_out"
 
-  # Run v2-equivalent Mutect2 (tumor-only targeted)
   run_cmd "gatk Mutect2" gatk Mutect2 \
     -R "$ref_fasta" \
     -I "$bam" \
     -L "$TARGETS_BED" \
     --max-reads-per-alignment-start 0 \
     --native-pair-hmm-threads "$THREADS" \
+    --f1r2-tar-gz "$f1r2_tar" \
     -O "$vcf_raw"
 
-  require_file "$vcf_raw"
+  verify_vcf_gz "$vcf_raw"
 
-  # Index raw VCF for downstream
   run_cmd "bcftools index (raw)" bcftools index -t -f "$vcf_raw"
   require_file "$vcf_raw_tbi"
 
+  verify_targz "$f1r2_tar"
+
   # Capture stats file deterministically
-  # Different GATK builds place stats in slightly different default locations.
   local cand=""
   for c in "${vcf_raw}.stats" "${vcf_raw%.vcf.gz}.stats" "${out_dir}/${SAMPLE_ID}.mutect2.unfiltered.stats"; do
     if [[ -s "$c" ]]; then cand="$c"; break; fi
   done
 
-  # If none found, look for a stats file produced alongside the raw VCF
   if [[ -z "$cand" ]]; then
     cand="$(ls -1 "${out_dir}"/*.stats 2>/dev/null | head -n1 || true)"
   fi
 
   [[ -n "$cand" && -s "$cand" ]] || die "Mutect2 stats not found after call (expected a *.stats near $vcf_raw)."
 
-  # Normalize to our canonical stats filename
   cp -f "$cand" "$stats_out"
   require_file "$stats_out"
+
+  local raw_n
+  raw_n="$(bcftools view -H "$vcf_raw" | wc -l || true)"
+  log "step_mutect_call raw_variants=$raw_n"
+}
+
+step_learn_read_orientation_model() {
+  require_cmd gatk
+  require_cmd tar
+  require_cmd wc
+
+  local out_dir="${RESULTS_DIR}/mutect2"
+  mkdir -p "$out_dir"
+
+  local f1r2_tar="${out_dir}/${SAMPLE_ID}.mutect2.f1r2.tar.gz"
+  local rom_tar="${out_dir}/${SAMPLE_ID}.read-orientation-model.tar.gz"
+
+  require_file "$f1r2_tar"
+  verify_targz "$f1r2_tar"
+
+  # Idempotent skip
+  if [[ -s "$rom_tar" ]]; then
+    log "SKIP step_learn_read_orientation_model (outputs present)"
+    return 0
+  fi
+
+  # Strict partial-output refusal
+  if [[ -e "$rom_tar" ]]; then
+    die "partial learn_read_orientation_model outputs exist; refusing overwrite. Delete:
+  $rom_tar
+to re-run"
+  fi
+
+  log "RUN step_learn_read_orientation_model"
+
+  run_cmd "gatk LearnReadOrientationModel" gatk LearnReadOrientationModel \
+    -I "$f1r2_tar" \
+    -O "$rom_tar"
+
+  verify_targz "$rom_tar"
+
+  local rom_entries
+  rom_entries="$(tar -tzf "$rom_tar" | wc -l || true)"
+  log "step_learn_read_orientation_model entries=$rom_entries"
 }
 
 step_mutect_filter() {
   require_cmd gatk
   require_cmd bcftools
+  require_cmd wc
 
   local manifest="${META_DIR}/bundle_manifest_used.json"
   require_file "$manifest"
@@ -896,10 +965,14 @@ step_mutect_filter() {
   local vcf_raw="${out_dir}/${SAMPLE_ID}.mutect2.unfiltered.vcf.gz"
   local vcf_raw_tbi="${vcf_raw}.tbi"
   local stats_out="${out_dir}/${SAMPLE_ID}.mutect2.stats"
+  local rom_tar="${out_dir}/${SAMPLE_ID}.read-orientation-model.tar.gz"
 
   require_file "$vcf_raw"
   require_file "$vcf_raw_tbi"
   require_file "$stats_out"
+  require_file "$rom_tar"
+  verify_vcf_gz "$vcf_raw"
+  verify_targz "$rom_tar"
 
   local vcf_filt="${out_dir}/${SAMPLE_ID}.mutect2.filtered.vcf.gz"
   local vcf_filt_tbi="${vcf_filt}.tbi"
@@ -907,24 +980,35 @@ step_mutect_filter() {
   # Idempotent skip
   if [[ -s "$vcf_filt" && -s "$vcf_filt_tbi" ]]; then
     log "SKIP step_mutect_filter (outputs present)"
-    return
+    return 0
+  fi
+
+  # Strict partial-output refusal
+  if [[ -e "$vcf_filt" || -e "$vcf_filt_tbi" ]]; then
+    die "partial mutect_filter outputs exist; refusing overwrite. Delete:
+  $vcf_filt
+  $vcf_filt_tbi
+to re-run"
   fi
 
   log "RUN step_mutect_filter"
-  rm -f "$vcf_filt" "$vcf_filt_tbi"
 
-  # v2-equivalent FilterMutectCalls
-  # (v2 did not pass --stats; many builds auto-detect via VCF basename.
-  # We still persist stats_out for provenance and future explicit wiring.)
   run_cmd "gatk FilterMutectCalls" gatk FilterMutectCalls \
     -R "$ref_fasta" \
     -V "$vcf_raw" \
+    --ob-priors "$rom_tar" \
     -O "$vcf_filt"
 
-  require_file "$vcf_filt"
+  verify_vcf_gz "$vcf_filt"
 
   run_cmd "bcftools index (filtered)" bcftools index -t -f "$vcf_filt"
   require_file "$vcf_filt_tbi"
+
+  local total_n
+  local pass_n
+  total_n="$(bcftools view -H "$vcf_filt" | wc -l || true)"
+  pass_n="$(bcftools view -H -f PASS "$vcf_filt" | wc -l || true)"
+  log "step_mutect_filter total_variants=$total_n pass_variants=$pass_n"
 }
 
 step_postprocess_pass() {
@@ -1108,10 +1192,11 @@ step_fastp
 step_align
 step_qc_gate
 step_mutect_call
+step_learn_read_orientation_model
 step_mutect_filter
 step_postprocess_pass
-log "TODO: step_mutect_call/filter"
-log "TODO: step_qc"
+# log "TODO: step_mutect_call/filter"
+# log "TODO: step_qc"
 step_metadata
 
 log "DONE (skeleton)."
