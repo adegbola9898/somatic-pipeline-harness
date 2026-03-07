@@ -1138,6 +1138,73 @@ to re-run"
   require_file "$perallele_tsv"
 }
 
+step_make_compact_pass_table() {
+  require_cmd gzip
+  require_cmd awk
+  require_cmd wc
+
+  local out_dir="${RESULTS_DIR}/mutect2"
+  local reports_dir="${RESULTS_DIR}/reports"
+  mkdir -p "$reports_dir"
+
+  local vcf_split="${out_dir}/${SAMPLE_ID}.PASS.norm.split.vcf.gz"
+  local vcf_split_tbi="${vcf_split}.tbi"
+  local vcf_split_csi="${vcf_split}.csi"
+
+  require_file "$vcf_split"
+  if [[ -s "$vcf_split_tbi" ]]; then
+    :
+  elif [[ -s "$vcf_split_csi" ]]; then
+    :
+  else
+    die "Missing index for split VCF (expected .tbi or .csi): $vcf_split"
+  fi
+
+  local compact_tsv="${reports_dir}/${SAMPLE_ID}.PASS.compact.tsv"
+
+  # Idempotent skip
+  if [[ -s "$compact_tsv" ]]; then
+    log "SKIP step_make_compact_pass_table (outputs present)"
+    return 0
+  fi
+
+  # Strict partial-output refusal
+  if [[ -e "$compact_tsv" ]]; then
+    die "partial compact report outputs exist; refusing overwrite. Delete:
+  $compact_tsv
+to re-run"
+  fi
+
+  log "RUN step_make_compact_pass_table"
+
+  run_to_file "PASS compact table" "$compact_tsv" bash -c "
+    set -euo pipefail
+    gzip -dc '$vcf_split' \
+    | awk 'BEGIN{FS=OFS=\"\t\"; print \"sample\",\"CHROM\",\"POS\",\"REF\",\"ALT\",\"DP\",\"AD_REF\",\"AD_ALT\",\"AF\",\"TLOD\"}
+           /^#/ {next}
+           {
+             split(\$9,F,\":\"); split(\$10,V,\":\");
+             dp=ad=af=tlod=\".\";
+             for(i=1;i<=length(F);i++){
+               if(F[i]==\"DP\") dp=V[i];
+               if(F[i]==\"AD\") ad=V[i];
+               if(F[i]==\"AF\") af=V[i];
+               if(F[i]==\"TLOD\") tlod=V[i];
+             }
+             split(ad,a,\",\");
+             ad_ref=(a[1] != \"\" ? a[1] : \".\");
+             ad_alt=(a[2] != \"\" ? a[2] : \".\");
+             print \"${SAMPLE_ID}\",\$1,\$2,\$4,\$5,dp,ad_ref,ad_alt,af,tlod
+           }'
+  "
+
+  require_file "$compact_tsv"
+
+  local n_rows
+  n_rows="$(awk 'NR>1{c++} END{print c+0}' "$compact_tsv")"
+  log "step_make_compact_pass_table rows=$n_rows"
+}
+
 
 step_metadata() {
   local meta="${META_DIR}/run_metadata.json"
@@ -1195,7 +1262,7 @@ step_mutect_call
 step_learn_read_orientation_model
 step_mutect_filter
 step_postprocess_pass
-# log "TODO: step_mutect_call/filter"
+step_make_compact_pass_table
 # log "TODO: step_qc"
 step_metadata
 
