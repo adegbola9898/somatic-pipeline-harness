@@ -1,8 +1,8 @@
-Somatic Pipeline Harness
+## Somatic Pipeline Harness
 
 A deterministic somatic variant calling pipeline for targeted sequencing panels.
 
-The pipeline is packaged with Docker and designed to be:
+The pipeline is containerised with Docker and designed to be:
 
 reproducible
 
@@ -12,63 +12,138 @@ cache-aware
 
 portable across machines
 
-The workflow performs:
+The goal of this project is to provide a clean, deterministic harness for targeted somatic variant analysis with strong reproducibility guarantees.
 
-FASTQ QC and trimming (fastp)
+## Workflow Overview
 
-Alignment (bwa-mem2)
+The pipeline performs the following steps:
 
-BAM processing (samtools)
+FASTQ ingestion
 
-Somatic variant calling (GATK Mutect2)
+Download sequencing data from SRA
 
-Variant filtering (FilterMutectCalls)
+Convert to FASTQ
 
-Variant post-processing (bcftools)
+Read QC and trimming
 
-Coverage QC (bedtools, samtools depth)
+fastp
 
-Pipeline output structure
+Alignment
+
+bwa-mem2
+
+BAM processing
+
+samtools sort
+
+samtools fixmate
+
+samtools markdup
+
+samtools index
+
+Coverage QC
+
+samtools depth
+
+bedtools
+
+Somatic variant calling
+
+GATK Mutect2
+
+Orientation bias modeling
+
+GATK LearnReadOrientationModel
+
+Variant filtering
+
+GATK FilterMutectCalls
+
+Variant post-processing
+
+bcftools norm
+
+PASS variant extraction
+
+per-allele TSV generation
+
+## Pipeline Output Structure
 
 Outputs follow a strict contract:
 
 OUTDIR/SAMPLE_ID/
-  inputs/
-  work/
-  results/
-  qc/
-  logs/
-  metadata/
+    inputs/
+    work/
+    results/
+    qc/
+    logs/
+    metadata/
 
 Example:
 
 out/DEMO1/
-  inputs/
-  logs/
-  metadata/
-  qc/
-  results/
-  work/
-
-Important outputs:
-
+    inputs/
+    logs/
+    metadata/
+    qc/
+    results/
+    work/
+## Important Outputs
+BAM
 results/bam/
-  DEMO1.sorted.markdup.bam
-  DEMO1.sorted.markdup.bam.bai
-
+    SAMPLE.sorted.markdup.bam
+    SAMPLE.sorted.markdup.bam.bai
+# Mutect2 Outputs
 results/mutect2/
-  DEMO1.mutect2.unfiltered.vcf.gz
-  DEMO1.mutect2.filtered.vcf.gz
-  DEMO1.PASS.norm.split.vcf.gz
-  DEMO1.PASS_variants.tsv
-  DEMO1.PASS_variants.perAllele.tsv
-  DEMO1.PASS_count.txt
 
+    SAMPLE.mutect2.unfiltered.vcf.gz
+    SAMPLE.mutect2.unfiltered.vcf.gz.tbi
+
+    SAMPLE.mutect2.filtered.vcf.gz
+    SAMPLE.mutect2.filtered.vcf.gz.tbi
+
+    SAMPLE.mutect2.stats
+
+    SAMPLE.mutect2.f1r2.tar.gz
+    SAMPLE.read-orientation-model.tar.gz
+
+These files correspond to the Mutect2 orientation bias workflow:
+
+Mutect2
+→ LearnReadOrientationModel
+→ FilterMutectCalls (--ob-priors)
+# PASS Variant Outputs
+results/mutect2/
+
+    SAMPLE.PASS.norm.split.vcf.gz
+    SAMPLE.PASS.norm.split.vcf.gz.csi
+
+    SAMPLE.PASS_variants.tsv
+    SAMPLE.PASS_variants.perAllele.tsv
+
+    SAMPLE.PASS_count.txt
+
+These files represent high-confidence PASS variants after filtering.
+
+# QC Outputs
 qc/
-  coverage_summary.tsv
-  per_gene_coverage.tsv
-  DEMO1.flagstat.txt
-1. Fetch reference bundle
+
+    coverage_summary.tsv
+    per_gene_coverage.tsv
+    SAMPLE.flagstat.txt
+
+These files summarise:
+
+mean coverage
+
+percentage of bases above coverage thresholds
+
+per-gene coverage statistics
+
+alignment statistics
+
+## Fetch Reference Bundle
 
 Create required directories:
 
@@ -84,7 +159,7 @@ Checksum:
 curl -L -o refs/reference/refs-grch38-bwamem2-r115-v1.tar.gz.sha256 \
 https://storage.googleapis.com/somatic/somatic_refs/reference/refs-grch38-bwamem2-r115-v1.tar.gz.sha256
 
-Download targets:
+Download the target panel:
 
 curl -L -o refs/targets/targets-34genes-ensembl115-v1.gene_labeled_pad10.bed \
 https://storage.googleapis.com/somatic/somatic_refs/targets/targets-34genes-ensembl115-v1.gene_labeled_pad10.bed
@@ -96,38 +171,41 @@ https://storage.googleapis.com/somatic/somatic_refs/targets/targets-34genes-ense
 
 If the download is interrupted (large file), resume with:
 
-curl -L -C - -o refs/reference/refs-grch38-bwamem2-r115-v1.tar.gz <URL>
-2. Build Docker environment
+curl -L -C - -o refs/reference/refs-grch38-bwamem2-r115-v1.tar.gz
+## Build Docker Environment
 docker build -f docker/Dockerfile.dev -t somatic-dev:local .
-3. Run pipeline
+## Run the Pipeline
+
+Example run:
+
 docker run --rm -u "$(id -u):$(id -g)" \
-  -v "$PWD":/work -w /work \
-  -v "$PWD/refs":/refs \
-  -v "$PWD/ref_cache":/ref_cache \
-  -v "$PWD/out":/out \
-  -e REF_CACHE_DIR=/ref_cache \
-  somatic-dev:local \
-  bash bin/run_somatic_pipeline.sh \
-    --sample-id DEMO1 \
-    --sra ERR7252107 \
-    --ref-bundle-dir /refs/reference \
-    --targets-bed /refs/targets/targets-34genes-ensembl115-v1.gene_labeled_pad10.bed \
-    --outdir /out \
-    --threads 8
-4. Reference caching
+-v "$PWD":/work -w /work \
+-v "$PWD/refs":/refs \
+-v "$PWD/ref_cache":/ref_cache \
+-v "$PWD/out":/out \
+-e REF_CACHE_DIR=/ref_cache \
+somatic-dev:local \
+bash bin/run_somatic_pipeline.sh \
+--sample-id DEMO1 \
+--sra ERR7252107 \
+--ref-bundle-dir /refs/reference \
+--targets-bed /refs/targets/targets-34genes-ensembl115-v1.gene_labeled_pad10.bed \
+--outdir /out \
+--threads 8
+## Reference Caching
 
 On the first run the reference bundle is extracted into:
 
-ref_cache/<bundle-id>-<sha>
+ref_cache/
 
 Subsequent runs reuse this cache and skip extraction.
 
 Example log:
 
 SKIP step_resources (outputs present + resource shas match)
-5. Idempotent pipeline execution
+## Idempotent Pipeline Execution
 
-The pipeline is designed to skip completed steps.
+The pipeline automatically skips completed steps.
 
 Example warm run output:
 
@@ -137,19 +215,23 @@ SKIP step_fastp
 SKIP step_align
 SKIP step_qc_gate
 SKIP step_mutect_call
+SKIP step_learn_read_orientation_model
 SKIP step_mutect_filter
 SKIP step_postprocess_pass
-6. Reproducibility test
+
+This allows rapid re-execution without recomputing completed stages.
+
+## Reproducibility Test
 
 Tested on a fresh Ubuntu WSL environment.
 
 Cold run:
 
-real    39m11s
+real 38m23s
 
 Warm run (no recomputation):
 
-real    59s
+real 56s
 
 This demonstrates:
 
@@ -159,7 +241,7 @@ reference caching
 
 idempotent execution
 
-7. WSL memory configuration
+## WSL Memory Configuration
 
 If running under WSL2, increase memory allocation to prevent bwa-mem2 from being killed by the OOM killer.
 
@@ -177,7 +259,7 @@ swap=8GB
 Restart WSL:
 
 wsl --shutdown
-8. Notes
+## Notes
 
 For machines with limited RAM, reduce threads:
 
@@ -185,7 +267,7 @@ For machines with limited RAM, reduce threads:
 
 Alignment and sorting are the most memory-intensive steps.
 
-What this pipeline guarantees
+## What This Pipeline Guarantees
 
 deterministic execution
 
@@ -196,3 +278,5 @@ reference integrity verification
 cache-aware execution
 
 structured output contract
+
+reproducible somatic variant calling workflow
