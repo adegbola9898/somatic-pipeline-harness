@@ -1565,25 +1565,27 @@ step_flag_variant_likelihood() {
   local flagged_tsv="${reports_dir}/${SAMPLE_ID}.PASS.flagged.tsv"
   local somaticish_tsv="${reports_dir}/${SAMPLE_ID}.PASS.somaticish.tsv"
   local germlineish_tsv="${reports_dir}/${SAMPLE_ID}.PASS.germlineish.tsv"
+  local uncertain_tsv="${reports_dir}/${SAMPLE_ID}.PASS.uncertain.tsv"
 
   # Idempotent skip
-  if [[ -s "$flagged_tsv" && -s "$somaticish_tsv" && -s "$germlineish_tsv" ]]; then
+  if [[ -s "$flagged_tsv" && -s "$somaticish_tsv" && -s "$germlineish_tsv" && -s "$uncertain_tsv" ]]; then
     log "SKIP step_flag_variant_likelihood (outputs present)"
     return 0
   fi
 
   # Strict partial-output refusal
-  if [[ -e "$flagged_tsv" || -e "$somaticish_tsv" || -e "$germlineish_tsv" ]]; then
+  if [[ -e "$flagged_tsv" || -e "$somaticish_tsv" || -e "$germlineish_tsv" || -e "$uncertain_tsv" ]]; then
     die "partial flagging outputs exist; refusing overwrite. Delete:
   $flagged_tsv
   $somaticish_tsv
   $germlineish_tsv
+  $uncertain_tsv
 to re-run"
   fi
 
   log "RUN step_flag_variant_likelihood"
 
-  python3 - "$annotated_tsv" "$flagged_tsv" "$somaticish_tsv" "$germlineish_tsv" <<'PY'
+  python3 - "$annotated_tsv" "$flagged_tsv" "$somaticish_tsv" "$germlineish_tsv" "$uncertain_tsv" <<'PY'
 import csv
 import sys
 from pathlib import Path
@@ -1592,6 +1594,7 @@ inp = Path(sys.argv[1])
 out_flagged = Path(sys.argv[2])
 out_som = Path(sys.argv[3])
 out_ger = Path(sys.argv[4])
+out_unc = Path(sys.argv[5])
 
 def parse_float(x):
     try:
@@ -1605,8 +1608,28 @@ def parse_int(x):
     except Exception:
         return None
 
+def clinvar_category(raw: str) -> str:
+    s = (raw or "").strip().lower()
+    if not s:
+        return "none"
+
+    has_benign = ("benign" in s)
+    has_path = ("pathogenic" in s)
+    has_uncertain = ("uncertain" in s)
+
+    if has_benign and not has_path and not has_uncertain:
+        return "benign_like"
+    if has_path and not has_benign and not has_uncertain:
+        return "pathogenic_like"
+    if has_uncertain and not has_benign and not has_path:
+        return "uncertain"
+    if has_benign or has_path or has_uncertain:
+        return "conflicting"
+
+    return "other"
+
 rows = []
-with inp.open() as f:
+with open(inp) as f:
     r = csv.DictReader(f, delimiter="\t")
     for row in r:
         af = parse_float(row.get("AF", ""))
@@ -1617,20 +1640,19 @@ with inp.open() as f:
         roq = parse_float(row.get("ROQ", ""))
         germq = parse_float(row.get("GERMQ", ""))
         gnomad_af = parse_float(row.get("VEP_gnomad_af", ""))
-        clin_sig = (row.get("VEP_clin_sig", "") or "").lower()
+        clin_sig_raw = row.get("VEP_clin_sig", "") or ""
+        clin_cat = clinvar_category(clin_sig_raw)
 
-        somaticish = False
-        germlineish = False
         reasons = []
+        germlineish = False
+        somaticish = False
 
-        if dp is not None and af is not None:
-            if dp >= 20 and af <= 0.35:
-                somaticish = True
-                reasons.append("low_af_depth_ok")
-
-            if dp >= 20 and af >= 0.90:
-                germlineish = True
-                reasons.append("very_high_af_depth_ok")
+        # -----------------------------
+        # Strong germline-like evidence
+        # -----------------------------
+        if dp is not None and af is not None and dp >= 20 and af >= 0.90:
+            germlineish = True
+            reasons.append("very_high_af_depth_ok")
 
         if ad_ref == 0 and ad_alt is not None and ad_alt >= 20:
             germlineish = True
@@ -1640,23 +1662,56 @@ with inp.open() as f:
             germlineish = True
             reasons.append("population_af_present")
 
-        if "benign" in clin_sig or "likely_benign" in clin_sig:
+        if clin_cat == "benign_like":
             germlineish = True
             reasons.append("clinvar_benign_like")
 
-        row["somaticish_flag"] = "1" if somaticish else "0"
-        row["germlineish_flag"] = "1" if germlineish else "0"
-        row["review_reasons"] = ";".join(reasons) if reasons else ""
+        # -----------------------------
+        # Somatic-like evidence
+        # -----------------------------
+        if dp is not None and af is not None and dp >= 20 and af <= 0.35:
+            # only count as somatic-like if no strong germline signal
+            if not germlineish:
+                somaticish = True
+                reasons.append("low_af_depth_ok")
+
+        if tlod is not None and tlod >= 10:
+            if somaticish:
+                reasons.append("tlod_support")
+
+        if roq is not None and roq >= 20:
+            if somaticish:
+                reasons.append("orientation_ok")
+
+        # -----------------------------
+        # Final classification
+        # -----------------------------
+        if germlineish:
+            classification = "germlineish"
+        elif somaticish:
+            classification = "somaticish"
+        else:
+            classification = "uncertain"
+            if not reasons:
+                reasons.append("insufficient_evidence")
+
+        row["somaticish_flag"] = "1" if classification == "somaticish" else "0"
+        row["germlineish_flag"] = "1" if classification == "germlineish" else "0"
+        row["classification"] = classification
+        row["review_reasons"] = ";".join(reasons)
+        row["clinvar_category"] = clin_cat
+
         rows.append(row)
 
 fieldnames = list(rows[0].keys()) if rows else []
 
 for path, keep_fn in [
     (out_flagged, lambda x: True),
-    (out_som, lambda x: x["somaticish_flag"] == "1"),
-    (out_ger, lambda x: x["germlineish_flag"] == "1"),
+    (out_som, lambda x: x["classification"] == "somaticish"),
+    (out_ger, lambda x: x["classification"] == "germlineish"),
+    (out_unc, lambda x: x["classification"] == "uncertain"),
 ]:
-    with path.open("w", newline="") as f:
+    with open(path, "w", newline="") as f:
         w = csv.DictWriter(f, delimiter="\t", fieldnames=fieldnames)
         w.writeheader()
         for row in rows:
@@ -1666,20 +1721,24 @@ for path, keep_fn in [
 print(f"Wrote flagged table: {out_flagged}")
 print(f"Wrote somaticish table: {out_som}")
 print(f"Wrote germlineish table: {out_ger}")
+print(f"Wrote uncertain table: {out_unc}")
 print(f"Total rows: {len(rows)}")
-print(f"Somaticish rows: {sum(1 for r in rows if r['somaticish_flag']=='1')}")
-print(f"Germlineish rows: {sum(1 for r in rows if r['germlineish_flag']=='1')}")
+print(f"Somaticish rows: {sum(1 for r in rows if r['classification']=='somaticish')}")
+print(f"Germlineish rows: {sum(1 for r in rows if r['classification']=='germlineish')}")
+print(f"Uncertain rows: {sum(1 for r in rows if r['classification']=='uncertain')}")
 PY
 
   require_file "$flagged_tsv"
   require_file "$somaticish_tsv"
   require_file "$germlineish_tsv"
+  require_file "$uncertain_tsv"
 
-  local n_flagged n_som n_ger
+  local n_flagged n_som n_ger n_unc
   n_flagged="$(awk 'NR>1{c++} END{print c+0}' "$flagged_tsv")"
   n_som="$(awk 'NR>1{c++} END{print c+0}' "$somaticish_tsv")"
   n_ger="$(awk 'NR>1{c++} END{print c+0}' "$germlineish_tsv")"
-  log "step_flag_variant_likelihood total=$n_flagged somaticish=$n_som germlineish=$n_ger"
+  n_unc="$(awk 'NR>1{c++} END{print c+0}' "$uncertain_tsv")"
+  log "step_flag_variant_likelihood total=$n_flagged somaticish=$n_som germlineish=$n_ger uncertain=$n_unc"
 }
 
 step_gene_summary() {
