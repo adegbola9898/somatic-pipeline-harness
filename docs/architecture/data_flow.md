@@ -7,7 +7,7 @@ submission to completion.
 
 ## Sequence Diagram
 
-![Data Flow](../../sequence_diagram.png)
+![Data Flow](./diagrams/data_flow.png))
 
 ## Execution Flow
 

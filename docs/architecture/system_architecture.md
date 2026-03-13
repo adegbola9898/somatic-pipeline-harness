@@ -18,7 +18,7 @@ The system architecture consists of the following components:
 
 ## Architecture Diagram
 
-![System Architecture](../../architecture_diagram.png)
+![System Architecture](../../architecture_diagram.png))
 
 ## Component Responsibilities
 

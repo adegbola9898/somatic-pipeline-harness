@@ -76,4 +76,4 @@ If a proposed feature does not directly support one of these actions, it should 
 Module 0 is complete when this file exists at:
 
 ```text
-docs/module_0_scope_note.md
+docs/product/module_0_scope_note.md
