@@ -9,6 +9,10 @@ export LC_ALL=C
 ##############################################
 
 PIPELINE_VERSION="${PIPELINE_VERSION:-somatic-harness-v0.1}"
+RUN_ID="${RUN_ID:-}"
+
+RUN_SUBMITTED_AT="${RUN_SUBMITTED_AT:-}"
+RUN_STARTED_AT="${RUN_STARTED_AT:-}"
 
 # ---- logging helpers (initialized after SAMPLE_ID is known) ----
 log() { echo "[$(date '+%F %T')] $*" >&2; }
@@ -82,6 +86,155 @@ write_atomic() {
   ensure_parent "$out"
   cat > "$tmp"
   mv -f "$tmp" "$out"
+}
+
+iso_utc_now() {
+  date -u +"%Y-%m-%dT%H:%M:%SZ"
+}
+
+json_escape() {
+  python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$1"
+}
+
+write_run_manifest() {
+  local out="${META_DIR}/run_manifest.json"
+  local input_mode=""
+  local input_uris_json="[]"
+
+  if [[ -n "$SRA" ]]; then
+    input_mode="sra"
+    input_uris_json="[$(json_escape "$SRA")]"
+  else
+    input_mode="fastq_pair"
+    input_uris_json="[$(json_escape "$FASTQ1"), $(json_escape "$FASTQ2")]"
+  fi
+
+  write_atomic "$out" <<EOF
+{
+  "run_id": $(json_escape "$RUN_ID"),
+  "sample_id": $(json_escape "$SAMPLE_ID"),
+  "pipeline_version": $(json_escape "$PIPELINE_VERSION"),
+  "container_image": $(json_escape "${CONTAINER_IMAGE:-unknown}"),
+  "reference_version": $(json_escape "$(basename "${REF_BUNDLE_DIR%/}")"),
+  "targets_bed_version": $(json_escape "$(basename "$TARGETS_BED")"),
+  "input_mode": $(json_escape "$input_mode"),
+  "input_uris": $input_uris_json,
+  "submitted_at": $(json_escape "$RUN_SUBMITTED_AT")
+}
+EOF
+
+  file_nonempty "$out" || die "failed to write run_manifest.json"
+}
+
+write_status_json() {
+  local status="$1"
+  local current_step="${2:-}"
+  local exit_code="${3:-null}"
+  local failure_category="${4:-}"
+  local failure_message="${5:-}"
+
+  local out="${META_DIR}/status.json"
+  local started_at_json="null"
+  local finished_at_json="null"
+  local current_step_json="null"
+  local exit_code_json="null"
+  local failure_category_json="null"
+  local failure_message_json="null"
+
+  [[ -n "${RUN_STARTED_AT:-}" ]] && started_at_json="$(json_escape "$RUN_STARTED_AT")"
+  [[ -n "$current_step" ]] && current_step_json="$(json_escape "$current_step")"
+  [[ "$exit_code" != "null" ]] && exit_code_json="$exit_code"
+  [[ -n "$failure_category" ]] && failure_category_json="$(json_escape "$failure_category")"
+  [[ -n "$failure_message" ]] && failure_message_json="$(json_escape "$failure_message")"
+
+  if [[ "$status" == "succeeded" || "$status" == "failed" || "$status" == "cancelled" ]]; then
+    finished_at_json="$(json_escape "$(iso_utc_now)")"
+  fi
+
+  write_atomic "$out" <<EOF
+{
+  "run_id": $(json_escape "$RUN_ID"),
+  "sample_id": $(json_escape "$SAMPLE_ID"),
+  "pipeline_version": $(json_escape "$PIPELINE_VERSION"),
+  "status": $(json_escape "$status"),
+  "current_step": ${current_step_json},
+  "submitted_at": $(json_escape "$RUN_SUBMITTED_AT"),
+  "started_at": ${started_at_json},
+  "finished_at": ${finished_at_json},
+  "exit_code": ${exit_code_json},
+  "failure_category": ${failure_category_json},
+  "failure_message": ${failure_message_json},
+  "last_updated_at": $(json_escape "$(iso_utc_now)")
+}
+EOF
+
+  file_nonempty "$out" || die "failed to write status.json"
+}
+
+write_artifacts_json() {
+  local out="${META_DIR}/artifacts.json"
+  local report_html="${RESULTS_DIR}/reports/${SAMPLE_ID}.report.html"
+  local stdout_log="${STDOUT_LOG}"
+  local stderr_log="${STDERR_LOG}"
+
+  local artifacts_json=""
+  local artifact_count=0
+
+  add_artifact_json() {
+    local name="$1"
+    local type="$2"
+    local path="$3"
+
+    [[ -s "$path" ]] || return 0
+
+    local rel_path="${path#${RUN_ROOT}/}"
+    local item
+    item=$(cat <<EOF
+{
+      "name": $(json_escape "$name"),
+      "type": $(json_escape "$type"),
+      "path": $(json_escape "$rel_path")
+    }
+EOF
+)
+
+    if [[ -n "$artifacts_json" ]]; then
+      artifacts_json="${artifacts_json},\n${item}"
+    else
+      artifacts_json="${item}"
+    fi
+    artifact_count=$((artifact_count + 1))
+  }
+
+  add_artifact_json "html_report" "report" "$report_html"
+  add_artifact_json "annotated_variants" "table" "${RESULTS_DIR}/reports/${SAMPLE_ID}.PASS.annotated.tsv"
+  add_artifact_json "gene_summary" "table" "${RESULTS_DIR}/reports/${SAMPLE_ID}.gene_summary.tsv"
+  add_artifact_json "pass_vcf" "vcf" "${RESULTS_DIR}/mutect2/${SAMPLE_ID}.PASS.norm.split.vcf.gz"
+
+  local report_html_rel=""
+  local stdout_log_rel=""
+  local stderr_log_rel=""
+
+  [[ -s "$report_html" ]] && report_html_rel="${report_html#${RUN_ROOT}/}"
+  [[ -s "$stdout_log" ]] && stdout_log_rel="${stdout_log#${RUN_ROOT}/}"
+  [[ -s "$stderr_log" ]] && stderr_log_rel="${stderr_log#${RUN_ROOT}/}"
+
+  write_atomic "$out" <<EOF
+{
+  "run_id": $(json_escape "$RUN_ID"),
+  "sample_id": $(json_escape "$SAMPLE_ID"),
+  "pipeline_version": $(json_escape "$PIPELINE_VERSION"),
+  "artifact_count": $artifact_count,
+  "report_html_path": $(if [[ -n "$report_html_rel" ]]; then json_escape "$report_html_rel"; else echo "null"; fi),
+  "stdout_log_path": $(if [[ -n "$stdout_log_rel" ]]; then json_escape "$stdout_log_rel"; else echo "null"; fi),
+  "stderr_log_path": $(if [[ -n "$stderr_log_rel" ]]; then json_escape "$stderr_log_rel"; else echo "null"; fi),
+  "artifacts": [
+$(printf '%b\n' "$artifacts_json")
+  ]
+}
+EOF
+
+  file_nonempty "$out" || die "failed to write artifacts.json"
 }
 
 verify_sha256_sidecar_in_dir() {
@@ -210,7 +363,7 @@ Usage:
     [--workdir DIR] [--enforce-qc-gate 0|1]
 
 Notes:
-  - Output contract: OUTDIR/ID/{inputs,work,results,qc,logs,metadata}
+  - Output contract: OUTDIR/runs/RUN_ID/{inputs,work,results,qc,logs,metadata}
 USAGE
 }
 
@@ -261,14 +414,18 @@ fi
 require_file "$TARGETS_BED"
 [[ -d "$REF_BUNDLE_DIR" ]] || die "missing reference bundle dir: $REF_BUNDLE_DIR"
 
-# ---- derive contract paths ----
-SAMPLE_ROOT="${OUTDIR%/}/${SAMPLE_ID}"
-INPUTS_DIR="${SAMPLE_ROOT}/inputs"
-WORK_DIR="${WORKDIR:-${SAMPLE_ROOT}/work}"
-RESULTS_DIR="${SAMPLE_ROOT}/results"
-QC_DIR="${SAMPLE_ROOT}/qc"
-LOG_DIR="${SAMPLE_ROOT}/logs"
-META_DIR="${SAMPLE_ROOT}/metadata"
+# ---- derive contract paths -----
+RUN_ID="${RUN_ID:-run_$(date -u +%Y%m%d_%H%M%S)_${SAMPLE_ID}}"
+RUN_ROOT="${OUTDIR%/}/runs/${RUN_ID}"
+INPUTS_DIR="${RUN_ROOT}/inputs"
+WORK_DIR="${WORKDIR:-${RUN_ROOT}/work}"
+RESULTS_DIR="${RUN_ROOT}/results"
+QC_DIR="${RUN_ROOT}/qc"
+LOG_DIR="${RUN_ROOT}/logs"
+META_DIR="${RUN_ROOT}/metadata"
+RUN_SUBMITTED_AT="${RUN_SUBMITTED_AT:-$(iso_utc_now)}"
+RUN_STARTED_AT="${RUN_STARTED_AT:-}"
+
 
 step_resources() {
   local manifest="${META_DIR}/bundle_manifest_used.json"
@@ -2195,16 +2352,24 @@ PY
   require_file "$html_report"
 }
 
-
 step_metadata() {
+  # Legacy compatibility metadata.
+  # The primary run contract is now:
+  #   metadata/run_manifest.json
+  #   metadata/status.json
+  #   metadata/artifacts.json
+  #
+  # This file is retained temporarily for backward compatibility with
+  # earlier reports or tooling that expect run_metadata.json.
+
   local meta="${META_DIR}/run_metadata.json"
 
   if file_nonempty "$meta"; then
-    log "SKIP step_metadata (outputs present)"
+    log "SKIP step_metadata (legacy compatibility metadata present)"
     return
   fi
 
-  log "RUN step_metadata"
+  log "RUN step_metadata (legacy compatibility metadata)"
 
   write_atomic "$meta" <<EOF
 {
@@ -2233,11 +2398,25 @@ mkdir -p "$INPUTS_DIR" "$WORK_DIR" "$RESULTS_DIR" "$QC_DIR" "$LOG_DIR" "$META_DI
 STDOUT_LOG="${LOG_DIR}/${SAMPLE_ID}.stdout.log"
 STDERR_LOG="${LOG_DIR}/${SAMPLE_ID}.stderr.log"
 
-trap 'rc=$?; [[ $rc -eq 0 ]] || log "Pipeline failed (rc=$rc). See: $STDERR_LOG"' EXIT
+write_run_manifest
+write_status_json "submitted" ""
+RUN_STARTED_AT="$(iso_utc_now)"
+write_status_json "running" ""
+
+trap '
+  rc=$?
+  if [[ $rc -eq 0 ]]; then
+    :
+  else
+    write_status_json "failed" "" "$rc" "pipeline" "Pipeline failed. See stderr log."
+    log "Pipeline failed (rc=$rc). See: $STDERR_LOG"
+  fi
+' EXIT
 
 log "Pipeline version: $PIPELINE_VERSION"
 log "Sample: $SAMPLE_ID"
-log "Out: $SAMPLE_ROOT"
+log "Run ID: $RUN_ID"
+log "Out: $RUN_ROOT"
 
 # ---- tool presence (minimal; will grow as steps are implemented) ----
 for c in samtools bcftools gatk bwa-mem2 fastp; do require_cmd "$c"; done
@@ -2259,5 +2438,8 @@ step_gene_summary
 step_make_html_report
 
 step_metadata
+
+write_artifacts_json
+write_status_json "succeeded" "" "0" "" ""
 
 log "DONE (skeleton)."

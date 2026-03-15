@@ -15,17 +15,19 @@ This layout must remain stable across pipeline versions.
 
 ---
 
-# Run Directory Structure
+# Canonical Run Root
 
-Each pipeline execution is represented by a unique **run_id**.
+Each pipeline execution is represented by a unique `run_id`.
 
-All outputs for that run are stored under a run-scoped directory.
+All outputs for that run are stored under a run-scoped directory:
 
-Example:
-
-```
+```text
 runs/<run_id>/
 ```
+
+For **Module 3 Approach 2**, `run_id` is the canonical execution identity.
+
+`sample_id` remains descriptive metadata but does **not** define the root directory.
 
 ---
 
@@ -36,27 +38,50 @@ Example directory structure produced by a run:
 ```
 runs/<run_id>/
 
-├── metadata/
-│   ├── run_manifest.json
-│   ├── status.json
-│   └── artifacts.json
-│
-├── logs/
-│   ├── pipeline.log
-│   └── step_logs/
-│
+├── inputs/
+├── work/
 ├── results/
 │   ├── bam/
 │   ├── mutect2/
 │   └── reports/
-│
-├── reports/
-│   └── SAMPLE.report.html
-│
-└── qc/
-    ├── coverage_summary.tsv
-    └── per_gene_coverage.tsv
+├── qc/
+├── logs/
+└── metadata/
+    ├── run_manifest.json
+    ├── status.json
+    └── artifacts.json
 ```
+
+---
+
+# Inputs Directory
+
+```
+runs/<run_id>/inputs/
+```
+
+Contains input material associated with the run.
+
+Examples:
+
+```
+SAMPLE_R1.fastq.gz
+SAMPLE_R2.fastq.gz
+```
+
+Or source tracking material for **SRA-based runs**.
+
+---
+
+# Work Directory
+
+```
+runs/<run_id>/work/
+```
+
+Contains temporary and intermediate files created during execution.
+
+This directory is **run-scoped and isolated** from other runs.
 
 ---
 
@@ -95,9 +120,8 @@ Contains execution logs for debugging and monitoring.
 Examples:
 
 ```
-pipeline.log
-step_align.log
-step_mutect.log
+DEMO1.stdout.log
+DEMO1.stderr.log
 ```
 
 These logs are useful for:
@@ -121,36 +145,19 @@ Example layout:
 ```
 results/
 
-bam/
+  bam/
     SAMPLE.sorted.markdup.bam
 
-mutect2/
+  mutect2/
     SAMPLE.mutect2.filtered.vcf.gz
 
-reports/
+  reports/
+    SAMPLE.report.html
     SAMPLE.PASS.annotated.tsv
     SAMPLE.gene_summary.tsv
 ```
 
-These are machine-readable outputs intended for downstream analysis.
-
----
-
-# Reports Directory
-
-```
-runs/<run_id>/reports/
-```
-
-Contains human-readable summary outputs.
-
-Example:
-
-```
-SAMPLE.report.html
-```
-
-This report is the primary artifact linked in the dashboard UI.
+These are **machine-readable and human-readable outputs** intended for downstream analysis and review.
 
 ---
 
@@ -170,13 +177,13 @@ per_gene_coverage.tsv
 SAMPLE.flagstat.txt
 ```
 
-These files support coverage review and run validation.
+These files support **coverage review and run validation**.
 
 ---
 
 # Cloud Storage Layout
 
-In cloud deployments, run directories are mirrored to Cloud Storage.
+In cloud deployments, run directories are mirrored to **Cloud Storage**.
 
 Example:
 
@@ -191,11 +198,11 @@ gs://somatic-demo-runs/runs/<run_id>/metadata/run_manifest.json
 gs://somatic-demo-runs/runs/<run_id>/metadata/status.json
 gs://somatic-demo-runs/runs/<run_id>/metadata/artifacts.json
 
-gs://somatic-demo-runs/runs/<run_id>/logs/pipeline.log
+gs://somatic-demo-runs/runs/<run_id>/logs/DEMO1.stdout.log
+gs://somatic-demo-runs/runs/<run_id>/logs/DEMO1.stderr.log
 
 gs://somatic-demo-runs/runs/<run_id>/results/
-
-gs://somatic-demo-runs/runs/<run_id>/reports/SAMPLE.report.html
+gs://somatic-demo-runs/runs/<run_id>/qc/
 ```
 
 ---
@@ -204,7 +211,7 @@ gs://somatic-demo-runs/runs/<run_id>/reports/SAMPLE.report.html
 
 The run directory layout follows several principles.
 
-### 1. Run isolation
+## 1. Run isolation
 
 Every run is fully contained under:
 
@@ -216,7 +223,7 @@ This prevents collisions and simplifies cleanup.
 
 ---
 
-### 2. Metadata-first structure
+## 2. Metadata-first structure
 
 The metadata directory allows the API to determine:
 
@@ -228,7 +235,7 @@ without scanning the entire directory tree.
 
 ---
 
-### 3. Cloud portability
+## 3. Cloud portability
 
 The layout must work identically for:
 
@@ -238,7 +245,7 @@ The layout must work identically for:
 
 ---
 
-### 4. Stable artifact paths
+## 4. Stable artifact paths
 
 Artifact paths should remain stable so that the UI and API can link to outputs without special-case logic.
 
@@ -258,7 +265,7 @@ must always live under:
 runs/<run_id>/metadata/
 ```
 
-This ensures that the platform can discover run state and artifacts consistently.
+This ensures that the platform can discover **run state and artifacts consistently**.
 
 ---
 
@@ -271,4 +278,4 @@ This layout will be used by:
 - **Module 6 — job execution orchestration**  
 - **Module 7 — dashboard artifact links**
 
-Changing this layout later would require refactoring the API and UI.
+Changing this layout later would require **refactoring the API and UI**.
