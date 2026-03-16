@@ -98,5 +98,62 @@ for path in "${REQUIRED_LOG_FILES[@]}"; do
 done
 echo "Required log files present."
 
-echo "Uploader stub ready."
+declare -a UPLOAD_PLAN=()
+
+add_file_to_plan() {
+  local src="$1"
+  local dst="$2"
+
+  if [[ -f "${src}" ]]; then
+    UPLOAD_PLAN+=("${src}|${dst}")
+  fi
+}
+
+add_dir_files_to_plan() {
+  local src_dir="$1"
+  local dst_prefix="$2"
+
+  if [[ ! -d "${src_dir}" ]]; then
+    return 0
+  fi
+
+  while IFS= read -r -d '' path; do
+    local rel
+    rel="${path#${src_dir}/}"
+    UPLOAD_PLAN+=("${path}|${dst_prefix}/${rel}")
+  done < <(find "${src_dir}" -maxdepth 1 -type f -print0 | sort -z)
+}
+
+echo "Building dry-run upload plan..."
+
+# metadata
+add_file_to_plan "${METADATA_DIR}/run_manifest.json" "${DEST}/metadata/run_manifest.json"
+add_file_to_plan "${METADATA_DIR}/status.json" "${DEST}/metadata/status.json"
+add_file_to_plan "${METADATA_DIR}/artifacts.json" "${DEST}/metadata/artifacts.json"
+
+# logs
+add_file_to_plan "${LOGS_DIR}/${SAMPLE_ID}.stdout.log" "${DEST}/logs/${SAMPLE_ID}.stdout.log"
+add_file_to_plan "${LOGS_DIR}/${SAMPLE_ID}.stderr.log" "${DEST}/logs/${SAMPLE_ID}.stderr.log"
+
+# qc
+add_dir_files_to_plan "${RUN_ROOT}/qc" "${DEST}/qc"
+
+# reports
+add_dir_files_to_plan "${RUN_ROOT}/results/reports" "${DEST}/reports"
+
+# bam
+add_dir_files_to_plan "${RUN_ROOT}/results/bam" "${DEST}/outputs/bam"
+
+# mutect2
+add_dir_files_to_plan "${RUN_ROOT}/results/mutect2" "${DEST}/outputs/mutect2"
+
+echo "Dry-run upload plan:"
+for entry in "${UPLOAD_PLAN[@]}"; do
+  src="${entry%%|*}"
+  dst="${entry#*|}"
+  echo "  ${src} -> ${dst}"
+done
+
+echo "Planned file count: ${#UPLOAD_PLAN[@]}"
+echo "Uploader dry-run ready."
 echo "No files uploaded yet."
