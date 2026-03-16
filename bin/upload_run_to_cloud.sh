@@ -45,6 +45,7 @@ if [[ -z "${RUN_ROOT}" ]]; then
 fi
 
 METADATA_DIR="${RUN_ROOT}/metadata"
+LOGS_DIR="${RUN_ROOT}/logs"
 
 REQUIRED_METADATA_FILES=(
   "${METADATA_DIR}/run_manifest.json"
@@ -58,14 +59,44 @@ echo "Run root: ${RUN_ROOT}"
 echo "Destination: ${DEST}"
 
 echo "Validating required metadata files..."
-
 for path in "${REQUIRED_METADATA_FILES[@]}"; do
   if [[ ! -f "${path}" ]]; then
     echo "ERROR: required metadata file missing: ${path}"
     exit 1
   fi
 done
-
 echo "Required metadata files present."
+
+SAMPLE_ID="$(python3 - <<'PY' "${METADATA_DIR}/run_manifest.json"
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as fh:
+    data = json.load(fh)
+
+sample_id = data.get("sample_id")
+if not sample_id:
+    raise SystemExit("ERROR: sample_id missing from run_manifest.json")
+
+print(sample_id)
+PY
+)"
+
+REQUIRED_LOG_FILES=(
+  "${LOGS_DIR}/${SAMPLE_ID}.stdout.log"
+  "${LOGS_DIR}/${SAMPLE_ID}.stderr.log"
+)
+
+echo "Resolved sample ID: ${SAMPLE_ID}"
+echo "Validating required log files..."
+for path in "${REQUIRED_LOG_FILES[@]}"; do
+  if [[ ! -f "${path}" ]]; then
+    echo "ERROR: required log file missing: ${path}"
+    exit 1
+  fi
+done
+echo "Required log files present."
+
 echo "Uploader stub ready."
 echo "No files uploaded yet."
