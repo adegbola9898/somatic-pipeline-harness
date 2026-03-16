@@ -173,6 +173,13 @@ if [[ "${EXECUTE}" == "false" ]]; then
   exit 0
 fi
 
+if [[ "${EXECUTE}" == "true" ]]; then
+  if ! command -v gsutil >/dev/null 2>&1; then
+    echo "ERROR: gsutil is required for --execute but was not found in PATH"
+    exit 1
+  fi
+fi
+
 echo "Executing upload..."
 
 for entry in "${UPLOAD_PLAN[@]}"; do
