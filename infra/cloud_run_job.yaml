@@ -1,0 +1,28 @@
+apiVersion: run.googleapis.com/v1
+kind: Job
+metadata:
+  name: somatic-pipeline-runner
+  annotations:
+    run.googleapis.com/launch-stage: BETA
+spec:
+  template:
+    spec:
+      template:
+        spec:
+          serviceAccountName: SOMATIC_PIPELINE_RUNNER_SERVICE_ACCOUNT
+          timeoutSeconds: 3600
+          containers:
+            - image: REGION-docker.pkg.dev/PROJECT_ID/REPOSITORY/somatic-pipeline-runner:IMAGE_TAG
+              command:
+                - /bin/bash
+                - bin/cloud_run_job_entrypoint.sh
+              env:
+                - name: RUNS_BUCKET
+                  value: RUNS_BUCKET_NAME
+                - name: GOOGLE_CLOUD_PROJECT
+                  value: PROJECT_ID
+                - name: FIRESTORE_COLLECTION
+                  value: runs
+          maxRetries: 0
+          taskCount: 1
+          parallelism: 1
