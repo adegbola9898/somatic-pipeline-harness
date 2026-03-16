@@ -12,13 +12,24 @@ set -euo pipefail
 #   docs/storage/uploader_behavior.md
 # ------------------------------------------------------------
 
-if [[ $# -ne 2 ]]; then
-  echo "Usage: $0 <run_id> <bucket>"
+EXECUTE=false
+
+if [[ $# -lt 2 || $# -gt 3 ]]; then
+  echo "Usage: $0 <run_id> <bucket> [--execute]"
   exit 1
 fi
 
 RUN_ID="$1"
 BUCKET="$2"
+
+if [[ $# -eq 3 ]]; then
+  if [[ "$3" == "--execute" ]]; then
+    EXECUTE=true
+  else
+    echo "ERROR: unknown option: $3"
+    exit 1
+  fi
+fi
 
 RUN_ROOT_CANDIDATES=(
   "runs/${RUN_ID}"
@@ -155,5 +166,21 @@ for entry in "${UPLOAD_PLAN[@]}"; do
 done
 
 echo "Planned file count: ${#UPLOAD_PLAN[@]}"
-echo "Uploader dry-run ready."
-echo "No files uploaded yet."
+
+if [[ "${EXECUTE}" == "false" ]]; then
+  echo "Dry-run mode (no uploads performed)."
+  echo "Use --execute to perform the upload."
+  exit 0
+fi
+
+echo "Executing upload..."
+
+for entry in "${UPLOAD_PLAN[@]}"; do
+  src="${entry%%|*}"
+  dst="${entry#*|}"
+
+  echo "Uploading: ${src}"
+  gsutil cp "${src}" "${dst}"
+done
+
+echo "Upload complete."
