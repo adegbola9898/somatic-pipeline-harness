@@ -109,14 +109,20 @@ for path in "${REQUIRED_LOG_FILES[@]}"; do
 done
 echo "Required log files present."
 
-declare -a UPLOAD_PLAN=()
+declare -a DATA_UPLOAD_PLAN=()
+declare -a METADATA_UPLOAD_PLAN=()
 
 add_file_to_plan() {
-  local src="$1"
-  local dst="$2"
+  local plan_name="$1"
+  local src="$2"
+  local dst="$3"
 
   if [[ -f "${src}" ]]; then
-    UPLOAD_PLAN+=("${src}|${dst}")
+    if [[ "${plan_name}" == "metadata" ]]; then
+      METADATA_UPLOAD_PLAN+=("${src}|${dst}")
+    else
+      DATA_UPLOAD_PLAN+=("${src}|${dst}")
+    fi
   fi
 }
 
@@ -131,20 +137,20 @@ add_dir_files_to_plan() {
   while IFS= read -r -d '' path; do
     local rel
     rel="${path#${src_dir}/}"
-    UPLOAD_PLAN+=("${path}|${dst_prefix}/${rel}")
+    DATA_UPLOAD_PLAN+=("${path}|${dst_prefix}/${rel}")
   done < <(find "${src_dir}" -maxdepth 1 -type f -print0 | sort -z)
 }
 
 echo "Building dry-run upload plan..."
 
 # metadata
-add_file_to_plan "${METADATA_DIR}/run_manifest.json" "${DEST}/metadata/run_manifest.json"
-add_file_to_plan "${METADATA_DIR}/status.json" "${DEST}/metadata/status.json"
-add_file_to_plan "${METADATA_DIR}/artifacts.json" "${DEST}/metadata/artifacts.json"
+add_file_to_plan "metadata" "${METADATA_DIR}/run_manifest.json" "${DEST}/metadata/run_manifest.json"
+add_file_to_plan "metadata" "${METADATA_DIR}/status.json" "${DEST}/metadata/status.json"
+add_file_to_plan "metadata" "${METADATA_DIR}/artifacts.json" "${DEST}/metadata/artifacts.json"
 
 # logs
-add_file_to_plan "${LOGS_DIR}/${SAMPLE_ID}.stdout.log" "${DEST}/logs/${SAMPLE_ID}.stdout.log"
-add_file_to_plan "${LOGS_DIR}/${SAMPLE_ID}.stderr.log" "${DEST}/logs/${SAMPLE_ID}.stderr.log"
+add_file_to_plan "data" "${LOGS_DIR}/${SAMPLE_ID}.stdout.log" "${DEST}/logs/${SAMPLE_ID}.stdout.log"
+add_file_to_plan "data" "${LOGS_DIR}/${SAMPLE_ID}.stderr.log" "${DEST}/logs/${SAMPLE_ID}.stderr.log"
 
 # qc
 add_dir_files_to_plan "${RUN_ROOT}/qc" "${DEST}/qc"
@@ -159,13 +165,20 @@ add_dir_files_to_plan "${RUN_ROOT}/results/bam" "${DEST}/outputs/bam"
 add_dir_files_to_plan "${RUN_ROOT}/results/mutect2" "${DEST}/outputs/mutect2"
 
 echo "Dry-run upload plan:"
-for entry in "${UPLOAD_PLAN[@]}"; do
+for entry in "${DATA_UPLOAD_PLAN[@]}"; do
+  src="${entry%%|*}"
+  dst="${entry#*|}"
+  echo "  ${src} -> ${dst}"
+done
+for entry in "${METADATA_UPLOAD_PLAN[@]}"; do
   src="${entry%%|*}"
   dst="${entry#*|}"
   echo "  ${src} -> ${dst}"
 done
 
-echo "Planned file count: ${#UPLOAD_PLAN[@]}"
+PLANNED_FILE_COUNT=$((${#DATA_UPLOAD_PLAN[@]} + ${#METADATA_UPLOAD_PLAN[@]}))
+echo "Planned file count: ${PLANNED_FILE_COUNT}"
+
 
 if [[ "${EXECUTE}" == "false" ]]; then
   echo "Dry-run mode (no uploads performed)."
@@ -182,11 +195,19 @@ fi
 
 echo "Executing upload..."
 
-for entry in "${UPLOAD_PLAN[@]}"; do
+for entry in "${DATA_UPLOAD_PLAN[@]}"; do
   src="${entry%%|*}"
   dst="${entry#*|}"
 
-  echo "Uploading: ${src}"
+  echo "Uploading data: ${src}"
+  gsutil cp "${src}" "${dst}"
+done
+
+for entry in "${METADATA_UPLOAD_PLAN[@]}"; do
+  src="${entry%%|*}"
+  dst="${entry#*|}"
+
+  echo "Uploading metadata: ${src}"
   gsutil cp "${src}" "${dst}"
 done
 
