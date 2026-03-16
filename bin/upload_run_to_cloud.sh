@@ -20,18 +20,52 @@ fi
 RUN_ID="$1"
 BUCKET="$2"
 
-RUN_ROOT="runs/${RUN_ID}"
+RUN_ROOT_CANDIDATES=(
+  "runs/${RUN_ID}"
+  "out/runs/${RUN_ID}"
+)
+
+RUN_ROOT=""
+for candidate in "${RUN_ROOT_CANDIDATES[@]}"; do
+  if [[ -d "${candidate}" ]]; then
+    RUN_ROOT="${candidate}"
+    break
+  fi
+done
+
 DEST="gs://${BUCKET}/runs/${RUN_ID}"
+
+if [[ -z "${RUN_ROOT}" ]]; then
+  echo "ERROR: run root not found for run_id=${RUN_ID}"
+  echo "Checked:"
+  for candidate in "${RUN_ROOT_CANDIDATES[@]}"; do
+    echo "  - ${candidate}"
+  done
+  exit 1
+fi
+
+METADATA_DIR="${RUN_ROOT}/metadata"
+
+REQUIRED_METADATA_FILES=(
+  "${METADATA_DIR}/run_manifest.json"
+  "${METADATA_DIR}/status.json"
+  "${METADATA_DIR}/artifacts.json"
+)
 
 echo "Preparing upload"
 echo "Run ID: ${RUN_ID}"
 echo "Run root: ${RUN_ROOT}"
 echo "Destination: ${DEST}"
 
-if [[ ! -d "${RUN_ROOT}" ]]; then
-  echo "ERROR: run root does not exist: ${RUN_ROOT}"
-  exit 1
-fi
+echo "Validating required metadata files..."
 
+for path in "${REQUIRED_METADATA_FILES[@]}"; do
+  if [[ ! -f "${path}" ]]; then
+    echo "ERROR: required metadata file missing: ${path}"
+    exit 1
+  fi
+done
+
+echo "Required metadata files present."
 echo "Uploader stub ready."
 echo "No files uploaded yet."
