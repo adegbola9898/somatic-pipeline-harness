@@ -193,6 +193,39 @@ if [[ "${EXECUTE}" == "true" ]]; then
   fi
 fi
 
+upload_one() {
+  local src="$1"
+  local dst="$2"
+  local content_type=""
+
+  case "${src}" in
+    *.json)
+      content_type="application/json"
+      ;;
+    *.html)
+      content_type="text/html"
+      ;;
+    *.tsv)
+      content_type="text/tab-separated-values"
+      ;;
+    *.txt)
+      content_type="text/plain"
+      ;;
+    *.vcf.gz|*.bam|*.bai|*.tbi|*.csi|*.tar.gz|*.gz)
+      content_type="application/octet-stream"
+      ;;
+    *)
+      content_type=""
+      ;;
+  esac
+
+  if [[ -n "${content_type}" ]]; then
+    gsutil -h "Content-Type:${content_type}" cp "${src}" "${dst}"
+  else
+    gsutil cp "${src}" "${dst}"
+  fi
+}
+
 echo "Executing upload..."
 
 for entry in "${DATA_UPLOAD_PLAN[@]}"; do
@@ -200,7 +233,7 @@ for entry in "${DATA_UPLOAD_PLAN[@]}"; do
   dst="${entry#*|}"
 
   echo "Uploading data: ${src}"
-  gsutil cp "${src}" "${dst}"
+  upload_one "${src}" "${dst}"
 done
 
 for entry in "${METADATA_UPLOAD_PLAN[@]}"; do
@@ -208,7 +241,7 @@ for entry in "${METADATA_UPLOAD_PLAN[@]}"; do
   dst="${entry#*|}"
 
   echo "Uploading metadata: ${src}"
-  gsutil cp "${src}" "${dst}"
+  upload_one "${src}" "${dst}"
 done
 
 echo "Upload complete."
