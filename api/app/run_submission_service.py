@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 from uuid import uuid4
+from app.clients.firestore_client import create_run_document
 
 
 DEFAULT_FIRESTORE_COLLECTION = "runs"
@@ -117,6 +118,12 @@ def submit_run(
         firestore_collection=firestore_collection,
     )
 
+    create_run_document(
+        firestore_collection,
+        resolved_run_id,
+        firestore_payload,
+    )
+
     job_launch_request = build_job_launch_request(
         resolved_run_id,
         job_name=job_name,
@@ -129,6 +136,6 @@ def submit_run(
         run_id=resolved_run_id,
         firestore_payload=firestore_payload,
         job_launch_request=job_launch_request,
-        firestore_write_status="stubbed_not_written",
+        firestore_write_status="written",
         job_launch_status="stubbed_not_launched",
     )

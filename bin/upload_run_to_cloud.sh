@@ -34,6 +34,7 @@ fi
 RUN_ROOT_CANDIDATES=(
   "runs/${RUN_ID}"
   "out/runs/${RUN_ID}"
+  "/tmp/pipeline_out/runs/${RUN_ID}"
 )
 
 RUN_ROOT=""
@@ -219,11 +220,29 @@ upload_one() {
       ;;
   esac
 
-  if [[ -n "${content_type}" ]]; then
-    gsutil -h "Content-Type:${content_type}" cp "${src}" "${dst}"
-  else
-    gsutil cp "${src}" "${dst}"
-  fi
+  python3 - <<PY_UPLOAD
+from google.cloud import storage
+
+src = r"""${src}"""
+dst = r"""${dst}"""
+content_type = r"""${content_type}"""
+
+if not dst.startswith("gs://"):
+    raise SystemExit(f"destination must start with gs://, got: {dst}")
+
+rest = dst[5:]
+bucket_name, object_name = rest.split("/", 1)
+
+client = storage.Client()
+bucket = client.bucket(bucket_name)
+blob = bucket.blob(object_name)
+
+if content_type:
+    blob.content_type = content_type
+
+blob.upload_from_filename(src, content_type=(content_type or None))
+print(f"uploaded {src} -> {dst}")
+PY_UPLOAD
 }
 
 echo "Executing upload..."

@@ -26,6 +26,42 @@ echo "[cloud-run-job] starting stub entrypoint"
 echo "[cloud-run-job] RUN_ID=${RUN_ID}"
 echo "[cloud-run-job] RUNS_BUCKET=${RUNS_BUCKET}"
 
+on_error() {
+  local exit_code="$?"
+  echo "[cloud-run-job] failed with exit_code=${exit_code}" >&2
+  firestore_update_status "failed" false || true
+  exit "${exit_code}"
+}
+
+trap on_error ERR
+
+firestore_update_status() {
+  local status="$1"
+  local metadata_finalized="$2"
+  local metadata_finalized_py="False"
+
+  if [[ "${metadata_finalized}" == "true" ]]; then
+    metadata_finalized_py="True"
+  fi
+
+  python3 - <<PY_FIRESTORE
+from datetime import datetime, timezone
+from google.cloud import firestore
+
+client = firestore.Client(project="${GOOGLE_CLOUD_PROJECT}")
+doc = client.collection("${FIRESTORE_COLLECTION}").document("${RUN_ID}")
+doc.set(
+    {
+        "status": "${status}",
+        "metadata_finalized": ${metadata_finalized_py},
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    },
+    merge=True,
+)
+print("firestore_status_updated", "${status}")
+PY_FIRESTORE
+}
+
 if [[ -n "${PIPELINE_WORKDIR:-}" ]]; then
   echo "[cloud-run-job] PIPELINE_WORKDIR=${PIPELINE_WORKDIR}"
 else
@@ -38,12 +74,36 @@ else
   echo "[cloud-run-job] PIPELINE_CONFIG not set"
 fi
 
-echo "[cloud-run-job] orchestration intent:"
-echo "  1. validate runtime inputs"
-echo "  2. update Firestore lifecycle state (not implemented in stub)"
-echo "  3. run bin/run_somatic_pipeline.sh (not implemented in stub)"
-echo "  4. run bin/upload_run_to_cloud.sh (not implemented in stub)"
-echo "  5. finalize Firestore state after metadata upload (not implemented in stub)"
-echo "[cloud-run-job] stub completed successfully"
+OUTDIR="${PIPELINE_OUTDIR:-/tmp/pipeline_out}"
+mkdir -p "${OUTDIR}"
+echo "[cloud-run-job] PIPELINE_OUTDIR=${OUTDIR}"
 
-exit 0
+firestore_update_status "running" false
+
+echo "[cloud-run-job] running pipeline"
+
+bin/run_somatic_pipeline.sh \
+  --sample-id "${RUN_ID}" \
+  --outdir "${OUTDIR}" \
+  --ref-bundle-dir /refs/reference \
+  --targets-bed /refs/targets/targets-34genes-ensembl115-v1.gene_labeled_pad10.bed \
+  --sra ERR7252107 \
+  --threads 4 \
+  --enforce-qc-gate 1
+
+echo "[cloud-run-job] storage auth probe"
+
+python3 - <<PY_STORAGE
+from google.cloud import storage
+
+client = storage.Client(project="${GOOGLE_CLOUD_PROJECT}")
+bucket = client.bucket("${RUNS_BUCKET}")
+blobs = list(client.list_blobs(bucket, prefix="runs/", max_results=1))
+print("storage_probe_ok", len(blobs))
+PY_STORAGE
+
+echo "[cloud-run-job] uploading results"
+bin/upload_run_to_cloud.sh "${RUN_ID}" "${RUNS_BUCKET}" --execute
+
+firestore_update_status "succeeded" true
+

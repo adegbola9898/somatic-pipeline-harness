@@ -6,4 +6,4 @@ COPY . /work
 
 ENV PATH="/work/cloudrun_bin:${PATH}"
 
-ENTRYPOINT ["/work/bin/run_somatic_pipeline.sh"]
+ENTRYPOINT ["/work/bin/cloud_run_job_entrypoint.sh"]
