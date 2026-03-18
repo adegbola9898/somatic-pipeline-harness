@@ -16,7 +16,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 from uuid import uuid4
-from app.clients.firestore_client import create_run_document
+from app.clients.firestore_client import create_run_document, update_run_document
+from app.clients.run_jobs_client import launch_job
 
 
 DEFAULT_FIRESTORE_COLLECTION = "runs"
@@ -129,13 +130,37 @@ def submit_run(
         job_name=job_name,
         runs_bucket=runs_bucket,
         firestore_collection=firestore_collection,
-        extra_env=extra_env,
+        extra_env={
+            **(extra_env or {}),
+            **({"SRA": request_payload.get("sra")} if request_payload and request_payload.get("sra") else {})
+        },
     )
+
+    launch_result = launch_job(
+        job_name=job_name,
+        run_id=resolved_run_id,
+        env_vars={
+            **(extra_env or {}),
+            **({"SRA": request_payload.get("sra")} if request_payload and request_payload.get("sra") else {}),
+        },
+    )
+
+    execution_name = launch_result.get("execution_name")
+
+    if execution_name:
+        update_run_document(
+            firestore_collection,
+            resolved_run_id,
+            {
+                "execution_name": execution_name,
+                "updated_at": utc_now_iso(),
+            },
+        )
 
     return SubmitRunResult(
         run_id=resolved_run_id,
         firestore_payload=firestore_payload,
         job_launch_request=job_launch_request,
         firestore_write_status="written",
-        job_launch_status="stubbed_not_launched",
+        job_launch_status="launched",
     )

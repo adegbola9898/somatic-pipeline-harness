@@ -13,6 +13,7 @@ def launch_job(
     run_id: str,
     region: Optional[str] = None,
     project_id: Optional[str] = None,
+    env_vars: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     resolved_project = project_id or settings.project_id
     resolved_region = region or settings.region
@@ -22,13 +23,18 @@ def launch_job(
         f"{resolved_region}/jobs/{job_name}:run"
     )
 
+    env = [
+        {"name": "RUN_ID", "value": run_id},
+    ]
+
+    for key, value in (env_vars or {}).items():
+        env.append({"name": key, "value": value})
+
     body = {
         "overrides": {
             "containerOverrides": [
                 {
-                    "env": [
-                        {"name": "RUN_ID", "value": run_id},
-                    ]
+                    "env": env,
                 }
             ]
         }

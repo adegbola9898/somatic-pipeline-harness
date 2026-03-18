@@ -26,10 +26,12 @@ echo "[cloud-run-job] starting stub entrypoint"
 echo "[cloud-run-job] RUN_ID=${RUN_ID}"
 echo "[cloud-run-job] RUNS_BUCKET=${RUNS_BUCKET}"
 
+FAILED_STEP="entrypoint"
+
 on_error() {
   local exit_code="$?"
   echo "[cloud-run-job] failed with exit_code=${exit_code}" >&2
-  firestore_update_status "failed" false || true
+  firestore_update_status "failed" false "${FAILED_STEP}" "${exit_code}" || true
   exit "${exit_code}"
 }
 
@@ -38,6 +40,8 @@ trap on_error ERR
 firestore_update_status() {
   local status="$1"
   local metadata_finalized="$2"
+  local failed_step="${3:-}"
+  local exit_code="${4:-}"
   local metadata_finalized_py="False"
 
   if [[ "${metadata_finalized}" == "true" ]]; then
@@ -54,6 +58,8 @@ doc.set(
     {
         "status": "${status}",
         "metadata_finalized": ${metadata_finalized_py},
+        "failed_step": "${failed_step}" if "${failed_step}" else firestore.DELETE_FIELD,
+        "exit_code": int("${exit_code}") if "${exit_code}" else firestore.DELETE_FIELD,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     },
     merge=True,
@@ -82,12 +88,14 @@ firestore_update_status "running" false
 
 echo "[cloud-run-job] running pipeline"
 
+FAILED_STEP="pipeline"
+
 bin/run_somatic_pipeline.sh \
   --sample-id "${RUN_ID}" \
   --outdir "${OUTDIR}" \
   --ref-bundle-dir /refs/reference \
   --targets-bed /refs/targets/targets-34genes-ensembl115-v1.gene_labeled_pad10.bed \
-  --sra ERR7252107 \
+  --sra "${SRA}" \
   --threads 4 \
   --enforce-qc-gate 1
 

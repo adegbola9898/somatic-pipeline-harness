@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Somatic Runs Dashboard</title>
+  <style>
+    body { font-family: Arial; margin: 40px; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { padding: 8px 12px; border: 1px solid #ccc; }
+    th { background: #f5f5f5; }
+    tr:hover { background: #fafafa; cursor: pointer; }
+    .status-succeeded { color: green; }
+    .status-failed { color: red; }
+    .status-running { color: orange; }
+  </style>
+</head>
+<body>
+
+<h2>Somatic Runs</h2>
+
+<table id="runs-table">
+  <thead>
+    <tr>
+      <th>Run ID</th>
+      <th>Status</th>
+      <th>Created</th>
+    </tr>
+  </thead>
+  <tbody></tbody>
+</table>
+
+<script>
+async function loadRuns() {
+  const apiBase = window.location.origin + window.location.pathname.replace(/\/proxy\/8081\/?$/, "/proxy/8000");
+  const res = await fetch(`${apiBase}/runs`);
+  const data = await res.json();
+
+  const tbody = document.querySelector("#runs-table tbody");
+  tbody.innerHTML = "";
+
+  data.runs.forEach(run => {
+    const tr = document.createElement("tr");
+
+    tr.innerHTML = `
+      <td>${run.run_id || "-"}</td>
+      <td class="status-${run.status}">${run.status || "-"}</td>
+      <td>${run.created_at || "-"}</td>
+    `;
+
+    tr.onclick = () => {
+      window.location.href = `run.html?run_id=${run.run_id}`;
+    };
+
+    tbody.appendChild(tr);
+  });
+}
+
+loadRuns();
+</script>
+
+</body>
+</html>

@@ -7,6 +7,8 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
 from app.run_submission_service import submit_run
+from app.clients.firestore_client import list_run_documents, get_run_document
+from app.clients.gcs_client import read_run_metadata, get_run_report_uri, get_run_qc_uri
 
 router = APIRouter(tags=["runs"])
 
@@ -54,19 +56,93 @@ def create_run(payload: RunCreateRequest) -> dict:
 
 @router.get("/runs")
 def list_runs() -> dict:
+    result = list_run_documents("runs", limit=50)
     return {
-        "runs": [],
+        "runs": result["runs"],
+        "count": result["count"],
         "backend": "firestore",
-        "status": "stubbed_not_implemented",
-        "message": "Run listing will be backed by Firestore in a later step.",
+        "status": "ok",
     }
 
 
 @router.get("/runs/{run_id}")
 def get_run(run_id: str) -> dict:
+    result = get_run_document("runs", run_id)
+
+    if not result["exists"]:
+        return {
+            "run_id": run_id,
+            "status": "not_found",
+            "backend": "firestore",
+        }
+
+    metadata = None
+    try:
+        metadata = read_run_metadata(run_id)
+    except Exception:
+        metadata = None
+
     return {
         "run_id": run_id,
+        "run": result["run"],
+        "metadata": metadata,
         "backend": "firestore",
-        "status": "stubbed_not_implemented",
-        "message": "Run lookup will be backed by Firestore in a later step.",
+        "status": "ok",
+    }
+
+
+@router.get("/runs/{run_id}/artifacts")
+def get_run_artifacts(run_id: str) -> dict:
+    try:
+        metadata = read_run_metadata(run_id)
+    except Exception:
+        return {
+            "run_id": run_id,
+            "status": "metadata_not_found",
+            "backend": "gcs",
+        }
+
+    return {
+        "run_id": run_id,
+        "artifacts": metadata["artifacts"],
+        "backend": "gcs",
+        "status": "ok",
+    }
+
+
+@router.get("/runs/{run_id}/report")
+def get_run_report(run_id: str) -> dict:
+    try:
+        result = get_run_report_uri(run_id)
+    except Exception:
+        return {
+            "run_id": run_id,
+            "status": "report_not_found",
+            "backend": "gcs",
+        }
+
+    return {
+        "run_id": run_id,
+        "report": result,
+        "backend": "gcs",
+        "status": "ok",
+    }
+
+
+@router.get("/runs/{run_id}/qc")
+def get_run_qc(run_id: str) -> dict:
+    try:
+        result = get_run_qc_uri(run_id)
+    except Exception:
+        return {
+            "run_id": run_id,
+            "status": "qc_not_found",
+            "backend": "gcs",
+        }
+
+    return {
+        "run_id": run_id,
+        "qc": result,
+        "backend": "gcs",
+        "status": "ok",
     }
