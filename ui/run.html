@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Clusta Genomics Run Detail</title>
+  <style>
+    body { font-family: Arial; margin: 40px; }
+    h1, h2 { margin-bottom: 8px; }
+    .subtle { color: #666; margin-bottom: 24px; }
+    .section { margin-top: 28px; }
+    .card {
+      border: 1px solid #ccc;
+      padding: 16px;
+      margin-bottom: 16px;
+      border-radius: 6px;
+      background: #fafafa;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: 220px 1fr;
+      gap: 8px 16px;
+    }
+    .label { font-weight: bold; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { padding: 8px 12px; border: 1px solid #ccc; text-align: left; }
+    th { background: #f5f5f5; }
+    a { text-decoration: none; }
+    .status-succeeded { color: green; }
+    .status-failed { color: red; }
+    .status-running { color: orange; }
+    .status-submitted { color: #444; }
+    .mono { font-family: monospace; word-break: break-all; }
+  </style>
+</head>
+<body>
+
+  <h1>Clusta Genomics</h1>
+  <div class="subtle">Somatic Run Detail</div>
+
+  <div class="card">
+    <div class="grid" id="summary-grid">
+      <div class="label">Run ID</div><div id="run-id">-</div>
+      <div class="label">Status</div><div id="run-status">-</div>
+      <div class="label">Created</div><div id="run-created">-</div>
+      <div class="label">Updated</div><div id="run-updated">-</div>
+      <div class="label">Execution</div><div id="run-execution" class="mono">-</div>
+      <div class="label">Metadata Finalized</div><div id="run-finalized">-</div>
+      <div class="label">Input SRA</div><div id="run-sra">-</div>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>Metadata</h2>
+    <div class="card">
+      <div class="grid">
+        <div class="label">Pipeline Version</div><div id="meta-pipeline-version">-</div>
+        <div class="label">Input Mode</div><div id="meta-input-mode">-</div>
+        <div class="label">Submitted At</div><div id="meta-submitted-at">-</div>
+        <div class="label">Started At</div><div id="meta-started-at">-</div>
+        <div class="label">Finished At</div><div id="meta-finished-at">-</div>
+        <div class="label">Artifact Count</div><div id="meta-artifact-count">-</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>Report</h2>
+    <div class="card">
+      <a id="report-link" href="#" target="_blank">Open report</a>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>QC / Logs</h2>
+    <div class="card">
+      <div><a id="stdout-link" href="#" target="_blank">Open stdout log</a></div>
+      <div style="margin-top: 8px;"><a id="stderr-link" href="#" target="_blank">Open stderr log</a></div>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>Artifacts</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Type</th>
+          <th>Path</th>
+        </tr>
+      </thead>
+      <tbody id="artifacts-body"></tbody>
+    </table>
+  </div>
+
+  <script>
+function getRunId() {
+  const params = new URLSearchParams(window.location.search);
+  return params.get("run_id");
+}
+
+function apiBase() {
+  return window.location.origin + window.location.pathname.replace(/\/proxy\/8081\/?$/, "/proxy/8000");
+}
+
+async function fetchJSON(path) {
+  const res = await fetch(`${apiBase()}${path}`);
+  return await res.json();
+}
+
+function setText(id, value) {
+  document.getElementById(id).textContent = value || "-";
+}
+
+async function loadRun() {
+  const runId = getRunId();
+  if (!runId) {
+    alert("Missing run_id");
+    return;
+  }
+
+  const runData = await fetchJSON(`/runs/${runId}`);
+  const artifactsData = await fetchJSON(`/runs/${runId}/artifacts`);
+  const reportData = await fetchJSON(`/runs/${runId}/report`);
+  const qcData = await fetchJSON(`/runs/${runId}/qc`);
+
+  const run = runData.run || {};
+  const metadata = runData.metadata || {};
+
+  // Summary
+  setText("run-id", run.run_id);
+  const statusEl = document.getElementById("run-status");
+  statusEl.textContent = run.status || "-";
+  statusEl.className = `status-${run.status}`;
+
+  setText("run-created", run.created_at);
+  setText("run-updated", run.updated_at);
+  setText("run-execution", run.execution_name);
+  setText("run-finalized", String(run.metadata_finalized));
+  setText("run-sra", run.request?.sra);
+
+  // Metadata
+  const manifest = metadata.run_manifest || {};
+  const status = metadata.status || {};
+  const artifacts = metadata.artifacts || {};
+
+  setText("meta-pipeline-version", manifest.pipeline_version);
+  setText("meta-input-mode", manifest.input_mode);
+  setText("meta-submitted-at", status.submitted_at);
+  setText("meta-started-at", status.started_at);
+  setText("meta-finished-at", status.finished_at);
+  setText("meta-artifact-count", artifacts.artifact_count);
+
+  // Report
+  if (reportData.report?.report_uri) {
+    document.getElementById("report-link").href = reportData.report.report_uri;
+  }
+
+  // QC
+  if (qcData.qc?.stdout_log_uri) {
+    document.getElementById("stdout-link").href = qcData.qc.stdout_log_uri;
+  }
+  if (qcData.qc?.stderr_log_uri) {
+    document.getElementById("stderr-link").href = qcData.qc.stderr_log_uri;
+  }
+
+  // Artifacts table
+  const tbody = document.getElementById("artifacts-body");
+  tbody.innerHTML = "";
+
+  (artifacts.artifacts || []).forEach(a => {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${a.name}</td>
+      <td>${a.type}</td>
+      <td class="mono">${a.path}</td>
+    `;
+    tbody.appendChild(tr);
+  });
+}
+
+loadRun();
+</script>
+
+</body>
+</html>
