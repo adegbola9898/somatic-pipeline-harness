@@ -5,9 +5,6 @@ This first cut defines the shape of:
 - initial Firestore payload construction
 - Cloud Run job launch request construction
 - submit_run() orchestration wrapper
-
-External integrations remain stubbed for now so the module can be
-wired incrementally without forcing framework or client decisions.
 """
 
 from __future__ import annotations
@@ -16,8 +13,10 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 from uuid import uuid4
+
 from app.clients.firestore_client import create_run_document, update_run_document
 from app.clients.run_jobs_client import launch_job
+from app.config import settings
 
 
 DEFAULT_FIRESTORE_COLLECTION = "runs"
@@ -87,6 +86,39 @@ def build_job_launch_request(
     }
 
 
+def resolve_launch_env(
+    request_payload: Optional[Dict[str, Any]],
+    *,
+    firestore_collection: str,
+    runs_bucket: Optional[str],
+    extra_env: Optional[Dict[str, str]],
+) -> Dict[str, str]:
+    request_payload = request_payload or {}
+
+    env: Dict[str, str] = {
+        "FIRESTORE_COLLECTION": firestore_collection,
+        "UPLOADS_BUCKET": settings.uploads_bucket,
+        "THREADS": str(settings.threads),
+        "TARGETS_BED": settings.targets_bed,
+    }
+
+    if runs_bucket:
+        env["RUNS_BUCKET"] = runs_bucket
+
+    if request_payload.get("sra"):
+        env["INPUT_MODE"] = "sra"
+        env["SRA"] = str(request_payload["sra"])
+    elif request_payload.get("fastq1") and request_payload.get("fastq2"):
+        env["INPUT_MODE"] = "fastq_pair"
+        env["FASTQ1"] = str(request_payload["fastq1"])
+        env["FASTQ2"] = str(request_payload["fastq2"])
+
+    if extra_env:
+        env.update(extra_env)
+
+    return env
+
+
 @dataclass
 class SubmitRunResult:
     run_id: str
@@ -105,12 +137,9 @@ def submit_run(
     job_name: str = DEFAULT_JOB_NAME,
     extra_env: Optional[Dict[str, str]] = None,
 ) -> SubmitRunResult:
-    """Create the minimum orchestration shape for a submitted run.
-
-    This function intentionally does not call Firestore or Cloud Run yet.
-    It returns the payloads that later wiring will persist and execute.
-    """
+    """Create the minimum orchestration shape for a submitted run."""
     resolved_run_id = run_id or generate_run_id()
+    resolved_runs_bucket = runs_bucket or settings.runs_bucket or None
 
     firestore_payload = build_initial_run_payload(
         resolved_run_id,
@@ -125,24 +154,25 @@ def submit_run(
         firestore_payload,
     )
 
+    launch_env = resolve_launch_env(
+        request_payload,
+        firestore_collection=firestore_collection,
+        runs_bucket=resolved_runs_bucket,
+        extra_env=extra_env,
+    )
+
     job_launch_request = build_job_launch_request(
         resolved_run_id,
         job_name=job_name,
-        runs_bucket=runs_bucket,
+        runs_bucket=resolved_runs_bucket,
         firestore_collection=firestore_collection,
-        extra_env={
-            **(extra_env or {}),
-            **({"SRA": request_payload.get("sra")} if request_payload and request_payload.get("sra") else {})
-        },
+        extra_env=launch_env,
     )
 
     launch_result = launch_job(
         job_name=job_name,
         run_id=resolved_run_id,
-        env_vars={
-            **(extra_env or {}),
-            **({"SRA": request_payload.get("sra")} if request_payload and request_payload.get("sra") else {}),
-        },
+        env_vars=launch_env,
     )
 
     execution_name = launch_result.get("execution_name")

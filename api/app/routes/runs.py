@@ -4,7 +4,7 @@ from typing import Any, Dict, Optional
 
 from fastapi import APIRouter
 from fastapi.responses import HTMLResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.run_submission_service import submit_run
 from app.clients.firestore_client import list_run_documents, get_run_document
@@ -15,8 +15,32 @@ router = APIRouter(tags=["runs"])
 
 class RunCreateRequest(BaseModel):
     runs_bucket: Optional[str] = Field(default=None, description="Target runs bucket")
-    request: Dict[str, Any] = Field(default_factory=dict, description="Opaque run request payload")
+    request: Dict[str, Any] = Field(default_factory=dict, description="Run request payload")
     extra_env: Dict[str, str] = Field(default_factory=dict, description="Optional extra env overrides")
+
+    @model_validator(mode="after")
+    def validate_request_payload(self) -> "RunCreateRequest":
+        request = self.request or {}
+
+        has_sra = bool(request.get("sra"))
+        has_fastq1 = bool(request.get("fastq1"))
+        has_fastq2 = bool(request.get("fastq2"))
+
+        if has_sra and (has_fastq1 or has_fastq2):
+            raise ValueError("Do not provide 'sra' together with 'fastq1'/'fastq2'.")
+
+        if has_sra:
+            return self
+
+        if has_fastq1 != has_fastq2:
+            raise ValueError("FASTQ mode requires both 'fastq1' and 'fastq2'.")
+
+        if has_fastq1 and has_fastq2:
+            return self
+
+        raise ValueError(
+            "Exactly one input mode must be provided: either 'sra' or both 'fastq1' and 'fastq2'."
+        )
 
 
 @router.get("/", response_class=HTMLResponse)

@@ -99,7 +99,7 @@ function getRunId() {
 }
 
 function apiBase() {
-  return window.location.origin + window.location.pathname.replace(/\/proxy\/8081\/?$/, "/proxy/8000");
+  return window.location.origin + "/proxy/8000";
 }
 
 async function fetchJSON(path) {
@@ -109,6 +109,12 @@ async function fetchJSON(path) {
 
 function setText(id, value) {
   document.getElementById(id).textContent = value || "-";
+}
+
+let pollHandle = null;
+
+function isTerminalStatus(status) {
+  return status === "succeeded" || status === "failed";
 }
 
 async function loadRun() {
@@ -176,9 +182,15 @@ async function loadRun() {
     `;
     tbody.appendChild(tr);
   });
+
+  if (isTerminalStatus(run.status) && pollHandle) {
+    clearInterval(pollHandle);
+    pollHandle = null;
+  }
 }
 
 loadRun();
+pollHandle = setInterval(loadRun, 5000);
 </script>
 
 </body>

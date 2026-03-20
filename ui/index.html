@@ -5,9 +5,67 @@
   <title>Somatic Runs Dashboard</title>
   <style>
     body { font-family: Arial; margin: 40px; }
+    h1 { margin-bottom: 6px; }
+    .subtle { color: #666; margin-bottom: 24px; }
+    .panel {
+      border: 1px solid #ddd;
+      border-radius: 8px;
+      padding: 16px;
+      margin-bottom: 20px;
+      background: #fafafa;
+    }
+    .panel h2 {
+      margin-top: 0;
+      font-size: 18px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: 180px 1fr;
+      gap: 10px 12px;
+      align-items: center;
+    }
+    label { font-weight: bold; }
+    input, select, button, textarea {
+      font: inherit;
+      padding: 8px;
+    }
+    input, select {
+      width: 100%;
+      box-sizing: border-box;
+    }
+    .hidden { display: none; }
+    .hint {
+      color: #555;
+      font-size: 14px;
+      margin-top: 8px;
+    }
+    .message {
+      margin-top: 12px;
+      padding: 10px 12px;
+      border-radius: 6px;
+      font-size: 14px;
+      white-space: pre-wrap;
+    }
+    .message.success {
+      background: #eef8ee;
+      border: 1px solid #b7d8b7;
+      color: #215c21;
+    }
+    .message.error {
+      background: #fff0f0;
+      border: 1px solid #e0b4b4;
+      color: #8a1f1f;
+    }
+    .examples code {
+      display: block;
+      padding: 6px 8px;
+      margin: 4px 0;
+      background: #f2f2f2;
+      border-radius: 4px;
+    }
     table { border-collapse: collapse; width: 100%; }
     th, td { padding: 8px 12px; border: 1px solid #ccc; }
-    th { background: #f5f5f5; }
+    th { background: #f5f5f5; text-align: left; }
     tr:hover { background: #fafafa; cursor: pointer; }
     .status-succeeded { color: green; }
     .status-failed { color: red; }
@@ -16,7 +74,49 @@
 </head>
 <body>
 
-<h2>Somatic Runs</h2>
+<h1>Clusta Genomics</h1>
+<div class="subtle">Somatic Runs Dashboard</div>
+
+<div class="panel">
+  <h2>Submit New Run</h2>
+  <div class="grid">
+    <label for="input-mode">Input mode</label>
+    <select id="input-mode">
+      <option value="sra">SRA accession</option>
+      <option value="fastq_pair">FASTQ pair</option>
+    </select>
+
+    <label for="sra-input" id="sra-label">SRA accession</label>
+    <input id="sra-input" type="text" placeholder="ERR7252119" />
+
+    <label for="fastq1-input" id="fastq1-label" class="hidden">FASTQ R1 URI</label>
+    <input id="fastq1-input" class="hidden" type="text" placeholder="gs://somatic-demo-uploads/FASTP_PROOF_R1.fastq.gz" />
+
+    <label for="fastq2-input" id="fastq2-label" class="hidden">FASTQ R2 URI</label>
+    <input id="fastq2-input" class="hidden" type="text" placeholder="gs://somatic-demo-uploads/FASTP_PROOF_R2.fastq.gz" />
+
+    <div></div>
+    <div>
+      <button id="submit-run-btn">Submit Run</button>
+      <div class="hint">Supported today: SRA accession, or FASTQ pair in the configured uploads bucket.</div>
+    </div>
+  </div>
+  <div id="submit-message"></div>
+</div>
+
+<div class="panel examples">
+  <h2>Example Inputs</h2>
+  <div><strong>SRA example</strong></div>
+  <code>ERR7252119</code>
+
+  <div style="margin-top: 12px;"><strong>FASTQ pair example</strong></div>
+  <code>gs://somatic-demo-uploads/FASTP_PROOF_R1.fastq.gz</code>
+  <code>gs://somatic-demo-uploads/FASTP_PROOF_R2.fastq.gz</code>
+
+  <div class="hint">
+    FASTQ submission currently expects objects that are accessible from the configured uploads bucket mount inside the runner.
+  </div>
+</div>
 
 <table id="runs-table">
   <thead>
@@ -30,15 +130,105 @@
 </table>
 
 <script>
+function getApiBase() {
+  return window.location.origin + window.location.pathname.replace(/\/proxy\/8081\/?$/, "/proxy/8000");
+}
+
+function setSubmitMessage(text, kind) {
+  const el = document.getElementById("submit-message");
+  if (!text) {
+    el.className = "";
+    el.textContent = "";
+    return;
+  }
+  el.className = `message ${kind}`;
+  el.textContent = text;
+}
+
+function updateInputModeUI() {
+  const mode = document.getElementById("input-mode").value;
+
+  const sraLabel = document.getElementById("sra-label");
+  const sraInput = document.getElementById("sra-input");
+  const fastq1Label = document.getElementById("fastq1-label");
+  const fastq1Input = document.getElementById("fastq1-input");
+  const fastq2Label = document.getElementById("fastq2-label");
+  const fastq2Input = document.getElementById("fastq2-input");
+
+  const isSra = mode === "sra";
+
+  sraLabel.classList.toggle("hidden", !isSra);
+  sraInput.classList.toggle("hidden", !isSra);
+  fastq1Label.classList.toggle("hidden", isSra);
+  fastq1Input.classList.toggle("hidden", isSra);
+  fastq2Label.classList.toggle("hidden", isSra);
+  fastq2Input.classList.toggle("hidden", isSra);
+
+  setSubmitMessage("", "");
+}
+
+async function submitRun() {
+  const apiBase = getApiBase();
+  const mode = document.getElementById("input-mode").value;
+  const sra = document.getElementById("sra-input").value.trim();
+  const fastq1 = document.getElementById("fastq1-input").value.trim();
+  const fastq2 = document.getElementById("fastq2-input").value.trim();
+  const button = document.getElementById("submit-run-btn");
+
+  let payload;
+
+  if (mode === "sra") {
+    payload = { request: { sra } };
+  } else {
+    payload = { request: { fastq1, fastq2 } };
+  }
+
+  button.disabled = true;
+  setSubmitMessage("Submitting run...", "success");
+
+  try {
+    const res = await fetch(`${apiBase}/runs`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+
+    const data = await res.json();
+
+    if (!res.ok) {
+      const detail = data.detail ? JSON.stringify(data.detail, null, 2) : JSON.stringify(data, null, 2);
+      throw new Error(detail);
+    }
+
+    setSubmitMessage(`Run submitted successfully.\nRun ID: ${data.run_id}`, "success");
+
+    document.getElementById("sra-input").value = "";
+    document.getElementById("fastq1-input").value = "";
+    document.getElementById("fastq2-input").value = "";
+
+    await loadRuns();
+  } catch (err) {
+    setSubmitMessage(`Submission failed.\n${err.message}`, "error");
+  } finally {
+    button.disabled = false;
+  }
+}
+
 async function loadRuns() {
-  const apiBase = window.location.origin + window.location.pathname.replace(/\/proxy\/8081\/?$/, "/proxy/8000");
+  const apiBase = getApiBase();
   const res = await fetch(`${apiBase}/runs`);
   const data = await res.json();
 
   const tbody = document.querySelector("#runs-table tbody");
   tbody.innerHTML = "";
 
-  data.runs.forEach(run => {
+  const runs = (data.runs || []).slice().sort((a, b) => {
+    const aTime = Date.parse(a.created_at || "") || 0;
+    const bTime = Date.parse(b.created_at || "") || 0;
+    return bTime - aTime;
+  });
+
+  runs.forEach(run => {
     const tr = document.createElement("tr");
 
     tr.innerHTML = `
@@ -55,6 +245,10 @@ async function loadRuns() {
   });
 }
 
+document.getElementById("input-mode").addEventListener("change", updateInputModeUI);
+document.getElementById("submit-run-btn").addEventListener("click", submitRun);
+
+updateInputModeUI();
 loadRuns();
 </script>
 
