@@ -9,6 +9,7 @@ This first cut defines the shape of:
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
@@ -17,6 +18,9 @@ from uuid import uuid4
 from app.clients.firestore_client import create_run_document, update_run_document
 from app.clients.run_jobs_client import launch_job
 from app.config import settings
+import logging
+
+logger = logging.getLogger("uvicorn.error")
 
 
 DEFAULT_FIRESTORE_COLLECTION = "runs"
@@ -142,6 +146,22 @@ def submit_run(
     resolved_runs_bucket = settings.runs_bucket
     if not resolved_runs_bucket:
         raise RuntimeError("RUNS_BUCKET is not configured")
+
+    logger.info(
+        "submit_run.resolved_config %s",
+        json.dumps(
+            {
+                "run_id": resolved_run_id,
+                "runs_bucket": resolved_runs_bucket,
+                "uploads_bucket": settings.uploads_bucket,
+                "input_mode": (
+                    "sra" if (request_payload or {}).get("sra")
+                    else "fastq_pair" if (request_payload or {}).get("fastq1") else "unknown"
+                ),
+            },
+            sort_keys=True,
+        ),
+    )
 
     firestore_payload = build_initial_run_payload(
         resolved_run_id,
