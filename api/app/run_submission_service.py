@@ -163,12 +163,26 @@ def submit_run(
         ),
     )
 
+    
+    input_mode = (
+        "sra" if (request_payload or {}).get("sra")
+        else "fastq_pair" if (request_payload or {}).get("fastq1") else "unknown"
+    )
+
     firestore_payload = build_initial_run_payload(
         resolved_run_id,
         request_payload=request_payload,
         status="submitted",
         firestore_collection=firestore_collection,
     )
+
+    
+    # enrich payload with resolved config
+    firestore_payload.update({
+        "input_mode": input_mode,
+        "runs_bucket": resolved_runs_bucket,
+        "uploads_bucket": settings.uploads_bucket,
+    })
 
     create_run_document(
         firestore_collection,
