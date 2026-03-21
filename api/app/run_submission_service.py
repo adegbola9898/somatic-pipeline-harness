@@ -139,7 +139,9 @@ def submit_run(
 ) -> SubmitRunResult:
     """Create the minimum orchestration shape for a submitted run."""
     resolved_run_id = run_id or generate_run_id()
-    resolved_runs_bucket = runs_bucket or settings.runs_bucket or None
+    resolved_runs_bucket = settings.runs_bucket
+    if not resolved_runs_bucket:
+        raise RuntimeError("RUNS_BUCKET is not configured")
 
     firestore_payload = build_initial_run_payload(
         resolved_run_id,

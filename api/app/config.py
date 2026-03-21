@@ -15,3 +15,15 @@ class Settings:
 
 
 settings = Settings()
+
+REQUIRED_ENV_VARS = [
+    "RUNS_BUCKET",
+    "UPLOADS_BUCKET",
+    "GOOGLE_CLOUD_PROJECT",
+]
+
+
+def validate_required_env() -> None:
+    missing = [name for name in REQUIRED_ENV_VARS if not os.environ.get(name)]
+    if missing:
+        raise RuntimeError(f"Missing required env vars: {', '.join(missing)}")
