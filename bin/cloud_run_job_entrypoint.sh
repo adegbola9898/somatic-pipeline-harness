@@ -44,6 +44,7 @@ resolve_fastq_path() {
 echo "[cloud-run-job] starting stub entrypoint"
 echo "[cloud-run-job] RUN_ID=${RUN_ID}"
 echo "[cloud-run-job] RUNS_BUCKET=${RUNS_BUCKET}"
+echo "[cloud-run-job] UPLOADS_BUCKET=${UPLOADS_BUCKET:-}"
 echo "[cloud-run-job] FIRESTORE_COLLECTION=${FIRESTORE_COLLECTION}"
 echo "[cloud-run-job] GOOGLE_CLOUD_PROJECT=${GOOGLE_CLOUD_PROJECT}"
 echo "[cloud-run-job] INPUT_MODE=${INPUT_MODE}"
