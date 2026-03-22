@@ -17,6 +17,8 @@ def main():
 
     parser.add_argument("--failed-step", default=None)
     parser.add_argument("--exit-code", type=int, default=None)
+    parser.add_argument("--failure-category", default=None)
+    parser.add_argument("--failure-reason", default=None)
 
     args = parser.parse_args()
 
@@ -34,6 +36,12 @@ def main():
 
     if args.exit_code is not None:
         payload["exit_code"] = args.exit_code
+
+    if args.failure_category:
+        payload["failure_category"] = args.failure_category
+
+    if args.failure_reason:
+        payload["failure_reason"] = args.failure_reason
 
     doc.set(payload, merge=True)
 

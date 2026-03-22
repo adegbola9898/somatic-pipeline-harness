@@ -74,11 +74,12 @@ case "${INPUT_MODE}" in
 esac
 
 FAILED_STEP="entrypoint"
+FAILURE_CATEGORY="entrypoint_validation"
 
 on_error() {
   local exit_code="$?"
   echo "[cloud-run-job] failed with exit_code=${exit_code}" >&2
-  firestore_update_status "failed" false "${FAILED_STEP}" "${exit_code}" || true
+  firestore_update_status "failed" false "${FAILED_STEP}" "${exit_code}" "${FAILURE_CATEGORY}" "${FAILED_STEP}" || true
   exit "${exit_code}"
 }
 
@@ -89,6 +90,8 @@ firestore_update_status() {
   local metadata_finalized="$2"
   local failed_step="${3:-}"
   local exit_code="${4:-}"
+  local failure_category="${5:-}"
+  local failure_reason="${6:-}"
 
   local cmd=(
     python3 bin/firestore_update.py
@@ -105,6 +108,14 @@ firestore_update_status() {
 
   if [[ -n "${exit_code}" ]]; then
     cmd+=(--exit-code "${exit_code}")
+  fi
+
+  if [[ -n "${failure_category}" ]]; then
+    cmd+=(--failure-category "${failure_category}")
+  fi
+
+  if [[ -n "${failure_reason}" ]]; then
+    cmd+=(--failure-reason "${failure_reason}")
   fi
 
   "${cmd[@]}"
@@ -131,6 +142,7 @@ firestore_update_status "running" false
 echo "[cloud-run-job] running pipeline"
 
 FAILED_STEP="pipeline"
+FAILURE_CATEGORY="pipeline_failure"
 
 if [[ "${INPUT_MODE}" == "sra" ]]; then
   bin/run_somatic_pipeline.sh \
