@@ -81,8 +81,24 @@ def create_run(payload: RunCreateRequest) -> dict:
 @router.get("/runs")
 def list_runs() -> dict:
     result = list_run_documents("runs", limit=50)
+    # normalize failure fields for external contract
+    runs = []
+    for r in result["runs"]:
+        r = dict(r)
+
+        if r.get("status") == "failed":
+            r["failure_stage"] = r.get("failed_step")
+            r["failure_code"] = r.get("failure_category")
+            r["failure_message"] = r.get("failure_reason")
+            if r.get("failure_category"):
+                r["retryable"] = r.get("failure_category") != "entrypoint_validation"
+            else:
+                r["retryable"] = None
+
+        runs.append(r)
+
     return {
-        "runs": result["runs"],
+        "runs": runs,
         "count": result["count"],
         "backend": "firestore",
         "status": "ok",
@@ -106,9 +122,20 @@ def get_run(run_id: str) -> dict:
     except Exception:
         metadata = None
 
+    run = dict(result["run"] or {})
+
+    if run.get("status") == "failed":
+        run["failure_stage"] = run.get("failed_step")
+        run["failure_code"] = run.get("failure_category")
+        run["failure_message"] = run.get("failure_reason")
+        if run.get("failure_category"):
+            run["retryable"] = run.get("failure_category") != "entrypoint_validation"
+        else:
+            run["retryable"] = None
+
     return {
         "run_id": run_id,
-        "run": result["run"],
+        "run": run,
         "metadata": metadata,
         "backend": "firestore",
         "status": "ok",
