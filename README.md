@@ -1,5 +1,99 @@
 # Somatic Pipeline Harness
 
+## 🌐 Platform Overview
+
+This project now includes a cloud-native execution platform for somatic variant analysis.
+
+### Live Services
+
+- UI (Cloud Run):
+  https://somatic-pipeline-ui-31752759845.us-central1.run.app
+
+- API (Cloud Run):
+  https://somatic-pipeline-api-31752759845.us-central1.run.app
+
+### Architecture
+
+User Browser -> Cloud Run UI -> Cloud Run API -> private GCS and Cloud Run Jobs
+
+Key principle:
+The browser never talks directly to GCS. All data access is mediated by the API.
+
+
+### Supported Inputs
+
+- SRA accession
+- FASTQ pair using gs:// paths
+
+### Execution Flow
+
+UI / API
+-> Firestore run record
+-> Cloud Run Job
+-> Pipeline execution
+-> Outputs written to GCS
+-> Metadata finalized
+
+### Storage Model
+
+Bucket:
+gs://somatic-demo-runs
+
+Layout:
+runs/{run_id}/metadata
+runs/{run_id}/logs
+runs/{run_id}/reports
+runs/{run_id}/outputs
+runs/{run_id}/qc
+
+### Artifact Access
+
+Artifacts are not exposed directly from GCS.
+
+The API provides:
+- GET /runs/{run_id}/report/content
+- GET /runs/{run_id}/qc/stdout
+- GET /runs/{run_id}/qc/stderr
+- GET /runs/{run_id}/artifacts/download?path=...
+
+### Security Model
+
+- GCS bucket: private
+- UI: public
+- API: public (no auth yet)
+- Artifact access: API-controlled
+
+### Current Limitations
+
+- No authentication
+- Static UI
+- No pagination on /runs
+- Polling-based updates
+
+
+## 🚀 Using the Platform
+
+You can use the hosted system directly without local setup:
+
+- Open the UI:
+  https://somatic-pipeline-ui-31752759845.us-central1.run.app
+
+- Submit a run using:
+  - SRA accession, or
+  - FASTQ files in gs://somatic-demo-uploads/
+
+- Monitor run status in the dashboard
+
+- View results:
+  - HTML report
+  - Logs (stdout/stderr)
+  - Download artifacts
+
+All data access is handled via the API.
+
+## 🧬 Pipeline Overview (Core Engine)
+
+
 A deterministic somatic variant calling pipeline for targeted sequencing panels.
 
 The pipeline is containerised with Docker and designed to be:
