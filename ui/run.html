@@ -99,7 +99,7 @@ function getRunId() {
 }
 
 function apiBase() {
-  return window.location.origin + "/proxy/8000";
+  return "https://somatic-pipeline-api-31752759845.us-central1.run.app";
 }
 
 async function fetchJSON(path) {
@@ -157,17 +157,11 @@ async function loadRun() {
   setText("meta-artifact-count", artifacts.artifact_count);
 
   // Report
-  if (reportData.report?.report_uri) {
-    document.getElementById("report-link").href = reportData.report.report_uri;
-  }
+  document.getElementById("report-link").href = `${apiBase()}/runs/${runId}/report/content`;
 
   // QC
-  if (qcData.qc?.stdout_log_uri) {
-    document.getElementById("stdout-link").href = qcData.qc.stdout_log_uri;
-  }
-  if (qcData.qc?.stderr_log_uri) {
-    document.getElementById("stderr-link").href = qcData.qc.stderr_log_uri;
-  }
+  document.getElementById("stdout-link").href = `${apiBase()}/runs/${runId}/qc/stdout`;
+  document.getElementById("stderr-link").href = `${apiBase()}/runs/${runId}/qc/stderr`;
 
   // Artifacts table
   const tbody = document.getElementById("artifacts-body");
@@ -175,10 +169,15 @@ async function loadRun() {
 
   (artifacts.artifacts || []).forEach(a => {
     const tr = document.createElement("tr");
+
+    const path = a.path || "";
+    const url = `${apiBase()}/runs/${runId}/artifacts/download?path=${encodeURIComponent(path)}`;
+    const linkable = Boolean(path);
+
     tr.innerHTML = `
       <td>${a.name}</td>
       <td>${a.type}</td>
-      <td class="mono">${a.path}</td>
+      <td class="mono">${linkable ? `<a href="${url}" download>${path}</a>` : "-"}</td>
     `;
     tbody.appendChild(tr);
   });

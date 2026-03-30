@@ -1,14 +1,15 @@
 from __future__ import annotations
 
+import os
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 from pydantic import BaseModel, Field, model_validator
 
 from app.run_submission_service import submit_run
 from app.clients.firestore_client import list_run_documents, get_run_document
-from app.clients.gcs_client import read_run_metadata, get_run_report_uri, get_run_qc_uri
+from app.clients.gcs_client import read_run_metadata, get_run_report_uri, get_run_qc_uri, download_blob_bytes, get_run_report_blob, get_run_qc_blob_paths, normalize_run_blob_path
 
 router = APIRouter(tags=["runs"])
 
@@ -165,11 +166,12 @@ def get_run_artifacts(run_id: str) -> dict:
 def get_run_report(run_id: str) -> dict:
     try:
         result = get_run_report_uri(run_id)
-    except Exception:
+    except Exception as e:
         return {
             "run_id": run_id,
             "status": "report_not_found",
             "backend": "gcs",
+            "error": str(e),
         }
 
     return {
@@ -184,11 +186,12 @@ def get_run_report(run_id: str) -> dict:
 def get_run_qc(run_id: str) -> dict:
     try:
         result = get_run_qc_uri(run_id)
-    except Exception:
+    except Exception as e:
         return {
             "run_id": run_id,
             "status": "qc_not_found",
             "backend": "gcs",
+            "error": str(e),
         }
 
     return {
@@ -197,3 +200,80 @@ def get_run_qc(run_id: str) -> dict:
         "backend": "gcs",
         "status": "ok",
     }
+
+
+@router.get("/runs/{run_id}/report/content")
+def get_run_report_content(run_id: str):
+    try:
+        result = get_run_report_blob(run_id)
+        content = download_blob_bytes(result["bucket"], result["blob_path"])
+    except Exception as e:
+        return {
+            "run_id": run_id,
+            "status": "report_content_not_found",
+            "backend": "gcs",
+            "error": str(e),
+        }
+
+    return Response(content=content, media_type=result["content_type"])
+
+
+@router.get("/runs/{run_id}/qc/stdout")
+def get_run_stdout_content(run_id: str):
+    try:
+        result = get_run_qc_blob_paths(run_id)
+        blob_path = result.get("stdout_blob_path")
+        if not blob_path:
+            raise FileNotFoundError(f"stdout log path missing for run_id={run_id}")
+        content = download_blob_bytes(result["bucket"], blob_path)
+    except Exception as e:
+        return {
+            "run_id": run_id,
+            "status": "stdout_not_found",
+            "backend": "gcs",
+            "error": str(e),
+        }
+
+    return Response(content=content, media_type="text/plain; charset=utf-8")
+
+
+@router.get("/runs/{run_id}/qc/stderr")
+def get_run_stderr_content(run_id: str):
+    try:
+        result = get_run_qc_blob_paths(run_id)
+        blob_path = result.get("stderr_blob_path")
+        if not blob_path:
+            raise FileNotFoundError(f"stderr log path missing for run_id={run_id}")
+        content = download_blob_bytes(result["bucket"], blob_path)
+    except Exception as e:
+        return {
+            "run_id": run_id,
+            "status": "stderr_not_found",
+            "backend": "gcs",
+            "error": str(e),
+        }
+
+    return Response(content=content, media_type="text/plain; charset=utf-8")
+
+
+@router.get("/runs/{run_id}/artifacts/download")
+def download_run_artifact(run_id: str, path: str):
+    try:
+        metadata = read_run_metadata(run_id)
+        bucket = metadata["bucket"]
+        blob_path = f"runs/{run_id}/{normalize_run_blob_path(path)}"
+        content = download_blob_bytes(bucket, blob_path)
+        filename = os.path.basename(path)
+    except Exception as e:
+        return {
+            "run_id": run_id,
+            "status": "artifact_not_found",
+            "backend": "gcs",
+            "error": str(e),
+        }
+
+    return Response(
+        content=content,
+        media_type="application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
