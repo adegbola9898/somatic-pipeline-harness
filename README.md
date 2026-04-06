@@ -571,3 +571,6 @@ Alignment and sorting are the most memory-intensive stages.
 ---
 
 
+# License
+
+MIT License
